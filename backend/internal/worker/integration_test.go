@@ -61,7 +61,7 @@ func TestImportLifecycle(t *testing.T) {
 		}
 		return i
 	}
-	web := add("website", "website.csv", "Order ID,SKU,Return Requested On,Last Updated On,Return Status\nA,S1,01/07/2026,08/10/2026,Returned to Seller\nB,S2,15/07/2026,20/07/2026,Return Initiated\n")
+	web := add("website", "website.csv", "Order ID,SKU,mSKU,Pick-up date,Last Updated On,Return Status\nA,X1,S1,01/07/2026,08/10/2026,Returned to Seller\nB,X2,S2,15/07/2026,20/07/2026,Return Initiated\n")
 	add("payment", "payment.csv", "date/time,type,order id,sku,total\n03/10/2026,Order,A,S1,300\n03/10/2026,Refund,A,S1,-270\n05/10/2026,Fulfilment Fee Refund,A,S1,50\n")
 	physical := add("physical", "physical.csv", "Order ID,SKU,Received Date\nB,S2,01/08/2026\n")
 	result := func() domain.Summary {
