@@ -107,14 +107,14 @@
       title: 'Website return data',
       desc: 'Amazon return reconciliation reports',
       icon: Package,
-      color: 'orange'
+      color: 'blue'
     },
     {
       kind: 'physical',
       title: 'Physical received data',
       desc: 'Your warehouse receipt records',
       icon: PackageCheck,
-      color: 'green'
+      color: 'blue'
     },
     {
       kind: 'payment',
@@ -731,10 +731,10 @@
           <div class="metric-grid clickable-metrics">
             {#each [
               { label: 'Returns', value: summary?.total, icon: Package, color: 'gray', kind: 'All returns' },
-              { label: 'Received', value: summary?.received, icon: PackageCheck, color: 'green', kind: 'Received' },
-              { label: 'Not received', value: summary?.not_received, icon: PackageX, color: 'orange', kind: 'Not Received' },
+              { label: 'Received', value: summary?.received, icon: PackageCheck, color: 'blue', kind: 'Received' },
+              { label: 'Not received', value: summary?.not_received, icon: PackageX, color: 'red', kind: 'Not Received' },
               { label: 'Debited', value: summary?.debited, icon: IndianRupee, color: 'red', kind: 'Debited' },
-              { label: 'Not debited', value: summary?.not_debited, icon: ShieldCheck, color: 'green', kind: 'Not Debited' }
+              { label: 'Not debited', value: summary?.not_debited, icon: ShieldCheck, color: 'blue', kind: 'Not Debited' }
             ] as m}<button class="metric-card metric-button" onclick={() => void openDashboardPreview(m.kind)}>
                 <div class="metric-top">
                   <span>{m.label}</span>
@@ -821,16 +821,16 @@
                   <h2>A little attention. A lot recovered.</h2>
                   <p>Your claims worklist, ready when you are.</p>
                 </div>
-                <div class="metric-icon orange"><ShieldCheck size={20} /></div>
+                <div class="metric-icon red"><ShieldCheck size={20} /></div>
               </div>
               <div class="claim-metrics expanded-claims">
                 {#each [
-                  ['Raise Claim', summary?.raise, 'Ready to claim', 'orange-bg'],
+                  ['Raise Claim', summary?.raise, 'Ready to claim', 'red-bg'],
                   ['Scheduled', summary?.scheduled, 'Scheduled', 'blue-bg'],
                   ['Pending', summary?.claim_pending, 'Submitted · pending', 'blue-bg'],
-                  ['Approved', summary?.claim_approved, 'Approved', 'green-bg'],
+                  ['Approved', summary?.claim_approved, 'Approved', 'blue-bg'],
                   ['Rejected', summary?.claim_rejected, 'Rejected', 'red-bg'],
-                  ['Expired', summary?.expired, 'Expired · not raised', 'gray-bg']
+                  ['Expired', summary?.expired, 'Expired · not raised', 'red-bg']
                 ] as q}<button onclick={() => { navigate('Claims'); claim = String(q[0]); void load(); }}>
                     <strong>{number(q[1] as number)}</strong><span><i class={'dot ' + q[3]}></i>{q[2]}</span>
                   </button>{/each}
