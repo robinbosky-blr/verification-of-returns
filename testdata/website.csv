@@ -1,0 +1,6 @@
+Customer Order ID,mSKU,Return Requested On,Last Updated On,Return Status
+DEMO-001,SKU-BLACK,01/07/2026,02/07/2026,Return Initiated
+DEMO-001,SKU-BLACK,01/07/2026,08/10/2026,Returned to Seller
+DEMO-002,SKU-NAVY,15/07/2026,18/07/2026,In-transit to Seller Flex Node
+DEMO-003,SKU-WHITE,31/12/2026,01/01/2027,Return Initiated
+DEMO-004,SKU-MAROON,20/07/2026,21/07/2026,Return Initiated

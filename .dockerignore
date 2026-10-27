@@ -1,0 +1,8 @@
+.git
+.qa
+node_modules
+**/node_modules
+**/build
+**/.svelte-kit
+.env
+backups

@@ -1,0 +1,5 @@
+date/time,type,order id,sku,total
+03/10/2026,Order,DEMO-001,SKU-BLACK,300.00
+03/10/2026,Refund,DEMO-001,SKU-BLACK,-270.00
+05/10/2026,Fulfilment Fee Refund,DEMO-001,SKU-BLACK,50.00
+01/08/2026,Order,DEMO-004,SKU-MAROON,250.00
