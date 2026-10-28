@@ -114,7 +114,14 @@ const aliases: Record<string, string[]> = {
   quantity: ['quantity', 'qty', 'returnquantity'],
   channel: ['fulfilment', 'fulfillment', 'fulfilmentchannel', 'fulfillmentchannel', 'returntype'],
   reason: ['returnreason', 'reason', 'subreason', 'customerreturnreason', 'returnsubreason'],
-  reference: ['transactionid', 'amazontransactionid', 'referenceid', 'transactionreference', 'transactionreferenceid', 'settlementid', 'settlementidentifier']
+  reference: ['transactionid', 'amazontransactionid', 'referenceid', 'transactionreference', 'transactionreferenceid', 'settlementid', 'settlementidentifier'],
+  approval: ['returnapprovaldate'],
+  completed: ['completeddate'],
+  out_for_delivery: ['outfordeliverydate'],
+  sale: ['saleamountrs'],
+  refund: ['refundrs'],
+  protection: ['protectionfundrs'],
+  marketplace_fee: ['marketplacefeerssumvai', 'marketplacefeers']
 };
 
 const amazonSourceAliases: Record<SourceRow['kind'], Partial<Record<string, string[]>>> = {
@@ -141,16 +148,21 @@ const flipkartSourceAliases: Record<SourceRow['kind'], Partial<Record<string, st
     order: ['orderid', 'orderitemid', 'orderunitid', 'shipmentid', 'returnid'],
     sku: ['sku', 'sellersku', 'merchantsku', 'fsn'],
     date: ['returncreationdate', 'returnrequesteddate', 'returnrequestdate', 'returndate', 'createddate'],
-    updated: ['lastupdateddate', 'lastupdatedon', 'statusupdateddate', 'updateddate', 'returncreationdate'],
-    delivered: ['returndelivereddate', 'delivereddatetoseller', 'receiveddate'],
+    updated: ['lastupdateddate', 'lastupdatedon', 'statusupdateddate', 'updateddate'],
+    approval: ['returnapprovaldate'],
+    completed: ['completeddate'],
+    out_for_delivery: ['outfordeliverydate'],
+    delivered: ['returndelivereddate', 'delivereddatetoseller', 'completeddate'],
     status: ['returnstatus', 'status', 'shipmentstatus'],
     channel: ['returntype', 'deliverytype', 'fulfilmenttype'],
-    reason: ['returnreason', 'reason', 'subreason', 'customerreturnreason']
+    reason: ['returnreason', 'returnsubreason', 'reason', 'subreason', 'customerreturnreason'],
+    reference: ['orderitemid']
   },
   physical: {
     order: ['orderid', 'orderitemid', 'orderunitid', 'shipmentid', 'returnid'],
     sku: ['sku', 'sellersku', 'fsn'],
-    date: ['receiveddate', 'physicalreceiveddate', 'returndate', 'date']
+    date: ['receiveddate', 'physicalreceiveddate', 'returndate', 'date'],
+    reference: ['orderitemid']
   },
   payment: {
     order: ['orderid', 'orderitemid', 'orderunitid', 'shipmentid'],
@@ -158,7 +170,11 @@ const flipkartSourceAliases: Record<SourceRow['kind'], Partial<Record<string, st
     date: ['paymentdate', 'transactiondate', 'settlementdate', 'date'],
     type: ['transactiontype', 'paymenttype', 'type', 'description'],
     amount: ['amount', 'totalamount', 'netamount', 'settlementvalue', 'total'],
-    reference: ['transactionid', 'referenceid', 'settlementid', 'claimid']
+    reference: ['orderitemid', 'transactionid', 'referenceid', 'settlementid', 'claimid'],
+    sale: ['saleamountrs'],
+    refund: ['refundrs'],
+    protection: ['protectionfundrs'],
+    marketplace_fee: ['marketplacefeerssumvai', 'marketplacefeers']
   }
 };
 
@@ -178,11 +194,18 @@ function columns(row: unknown[], kind: SourceRow['kind'], marketplace: Marketpla
   return result;
 }
 
-function validColumns(cols: Record<string, number>, kind: string) {
+function validColumns(cols: Record<string, number>, kind: string, marketplace: Marketplace) {
   if (cols.order === undefined) return false;
-  if (kind !== 'payment' && cols.sku === undefined) return false;
-  if (kind === 'website') return cols.updated !== undefined && cols.status !== undefined;
-  if (kind === 'payment') return cols.date !== undefined && cols.type !== undefined && cols.amount !== undefined;
+  if (kind === 'website') {
+    if (cols.sku === undefined || cols.status === undefined) return false;
+    return marketplace === 'flipkart' ? cols.date !== undefined : cols.updated !== undefined;
+  }
+  if (kind === 'physical') return marketplace === 'flipkart' || cols.sku !== undefined;
+  if (kind === 'payment') {
+    if (cols.date === undefined) return false;
+    if (marketplace === 'flipkart') return (cols.type !== undefined && cols.amount !== undefined) || cols.sale !== undefined || cols.refund !== undefined || cols.protection !== undefined;
+    return cols.type !== undefined && cols.amount !== undefined;
+  }
   return true;
 }
 
@@ -239,7 +262,7 @@ function money(value: unknown): number {
   return Math.round(amount * 100);
 }
 
-function parseSheet(data: unknown[][], name: string, marketplace: Marketplace, kind: SourceRow['kind'], coverage: string, importId: string, importedAt: string): SourceRow[] {
+function parseSheet(data: unknown[][], name: string, marketplace: Marketplace, kind: SourceRow['kind'], coverage: string, importId: string, importedAt: string, optionalSheet = false): SourceRow[] {
   let cols: Record<string, number> | null = null;
   let previousOrder = '';
   const output: SourceRow[] = [];
@@ -247,9 +270,9 @@ function parseSheet(data: unknown[][], name: string, marketplace: Marketplace, k
     const cells = data[index] ?? [];
     if (!cells.some((v) => clean(v))) { previousOrder = ''; continue; }
     const possible = columns(cells, kind, marketplace);
-    if (validColumns(possible, kind)) { cols = possible; previousOrder = ''; continue; }
+    if (validColumns(possible, kind, marketplace)) { cols = possible; previousOrder = ''; continue; }
     if (!cols) {
-      if (index >= 49) throw new Error(`${name}: required ${kind} headers were not found in the first 50 rows.`);
+      if (index >= 49) break;
       continue;
     }
     const get = (field: string) => cols![field] === undefined ? '' : cells[cols![field]];
@@ -262,11 +285,14 @@ function parseSheet(data: unknown[][], name: string, marketplace: Marketplace, k
     }
     if (!order && kind === 'payment') continue;
     if (!order) throw new Error(`${name} row ${index + 1}: Order ID is missing.`);
-    if (!sku && kind !== 'payment') throw new Error(`${name} row ${index + 1}: SKU is missing.`);
+    if (!sku && kind !== 'payment' && !(marketplace === 'flipkart' && kind === 'physical')) throw new Error(`${name} row ${index + 1}: SKU is missing.`);
     let rowDate = '';
     let updated = '';
     if (kind === 'website') {
-      try { updated = isoDate(get('updated'), 'Last Updated Date'); }
+      const updatedValue = marketplace === 'flipkart'
+        ? get('completed') || get('out_for_delivery') || get('approval') || get('date')
+        : get('updated');
+      try { updated = isoDate(updatedValue, marketplace === 'flipkart' ? 'Flipkart status date' : 'Last Updated Date'); }
       catch (error) { throw new Error(`${name} row ${index + 1}: ${(error as Error).message}`); }
       try { rowDate = clean(get('date')) ? isoDate(get('date'), 'Return Date') : updated; }
       catch (error) { throw new Error(`${name} row ${index + 1}: ${(error as Error).message}`); }
@@ -281,11 +307,7 @@ function parseSheet(data: unknown[][], name: string, marketplace: Marketplace, k
     let delivered = '';
     if (clean(get('delivered'))) delivered = isoDate(get('delivered'), 'Delivered Date');
     let amount = 0;
-    if (kind === 'payment') {
-      amount = money(get('amount'));
-      if (!clean(get('type'))) throw new Error(`${name} row ${index + 1}: Payment Type is missing.`);
-    }
-    output.push({
+    const base: SourceRow = {
       import_id: importId,
       kind,
       order_id: order,
@@ -302,9 +324,30 @@ function parseSheet(data: unknown[][], name: string, marketplace: Marketplace, k
       source: name,
       line: index + 1,
       imported_at: importedAt
-    });
+    };
+    if (kind === 'payment' && marketplace === 'flipkart' && (cols.sale !== undefined || cols.refund !== undefined || cols.protection !== undefined)) {
+      const transactions: Array<[string, unknown]> = [
+        ['SALE', get('sale')],
+        ['REFUND', get('refund')],
+        ['SPF REIMBURSEMENT', get('protection')]
+      ];
+      for (const [type, value] of transactions) {
+        const transactionAmount = money(value);
+        if (transactionAmount) output.push({ ...base, type, amount: transactionAmount });
+      }
+      const fee = money(get('marketplace_fee'));
+      if (fee > 0) output.push({ ...base, type: 'FEE REFUND', amount: fee });
+      continue;
+    }
+    if (kind === 'payment') {
+      amount = money(get('amount'));
+      if (!clean(get('type'))) throw new Error(`${name} row ${index + 1}: Payment Type is missing.`);
+      base.amount = amount;
+    }
+    output.push(base);
   }
   if (!cols) {
+    if (optionalSheet) return [];
     const expected = kind === 'website'
       ? 'Customer Order ID, mSKU, Last Updated On, and Return Status (Return Created/Pick-up Date is optional)'
       : kind === 'physical' ? 'Order Id and SKU' : 'date/time, type, order id, and total';
@@ -316,10 +359,11 @@ function parseSheet(data: unknown[][], name: string, marketplace: Marketplace, k
 function workbookRows(bytes: Uint8Array, filename: string, marketplace: Marketplace, kind: SourceRow['kind'], coverage: string, importId: string, importedAt: string): SourceRow[] {
   const workbook = XLSX.read(bytes, { type: 'array', cellDates: false, raw: true });
   const rows: SourceRow[] = [];
+  const optionalSheets = marketplace === 'flipkart' && workbook.SheetNames.length > 1;
   for (const sheetName of workbook.SheetNames) {
     const data = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheetName], { header: 1, raw: true, defval: '' });
     if (!data.some((row) => row.some((value) => clean(value)))) continue;
-    rows.push(...parseSheet(data, filename.toLowerCase().endsWith('.csv') ? 'CSV' : sheetName, marketplace, kind, coverage, importId, importedAt));
+    rows.push(...parseSheet(data, filename.toLowerCase().endsWith('.csv') ? 'CSV' : sheetName, marketplace, kind, coverage, importId, importedAt, optionalSheets));
   }
   return rows;
 }
@@ -534,9 +578,26 @@ function claimWindow(result: Case, open: string, deadline: string, rule: string,
 function reconcileFlipkartBrowser(state: BrowserState): Case[] {
   const rows = activeRows(state);
   const website = new Map<string, SourceRow[]>(), physical = new Map<string, SourceRow[]>(), payments = new Map<string, SourceRow[]>();
-  for (const row of rows) {
+  const orderKeys = new Map<string, Set<string>>(), itemKeys = new Map<string, Set<string>>();
+  for (const row of rows.filter((item) => item.kind === 'website')) {
     const key = keyOf(row.order_id, row.sku);
-    const target = row.kind === 'website' ? website : row.kind === 'physical' ? physical : payments;
+    website.set(key, [...(website.get(key) ?? []), row]);
+    const byOrder = orderKeys.get(row.order_id) ?? new Set<string>(); byOrder.add(key); orderKeys.set(row.order_id, byOrder);
+    if (row.reference_id) { const byItem = itemKeys.get(row.reference_id) ?? new Set<string>(); byItem.add(key); itemKeys.set(row.reference_id, byItem); }
+  }
+  const resolveCase = (row: SourceRow) => {
+    if (row.sku) { const direct = keyOf(row.order_id, row.sku); if (website.has(direct)) return direct; }
+    const byItem = row.reference_id ? itemKeys.get(row.reference_id) : undefined;
+    if (byItem?.size === 1) return [...byItem][0];
+    const byOrder = orderKeys.get(row.order_id);
+    if (byOrder?.size === 1) return [...byOrder][0];
+    return '';
+  };
+  const ambiguous = new Map<string, number>();
+  for (const row of rows.filter((item) => item.kind !== 'website')) {
+    const key = resolveCase(row);
+    if (!key) { ambiguous.set(row.order_id, (ambiguous.get(row.order_id) ?? 0) + 1); continue; }
+    const target = row.kind === 'physical' ? physical : payments;
     target.set(key, [...(target.get(key) ?? []), row]);
   }
   const output: Case[] = [], now = new Date();
@@ -557,6 +618,7 @@ function reconcileFlipkartBrowser(state: BrowserState): Case[] {
       claim_rejection_reason: '', claim_notes: '', user_notes: '', rule_version: 'flipkart-spf-v1', notes: [],
       evidence: [...ordered, ...receivedRows].map(evidence)
     };
+    if (ambiguous.get(latest.order_id)) result.notes.push(`${ambiguous.get(latest.order_id)} Flipkart row(s) need Order Item ID or SKU for allocation.`);
     const manual = state.claims[key];
     if (manual) Object.assign(result, manual);
     const tx = payments.get(key) ?? [];

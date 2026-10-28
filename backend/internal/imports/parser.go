@@ -41,6 +41,13 @@ var aliases = map[string][]string{
 	"channel":   {"fulfilment", "fulfillment", "fulfilmentchannel", "fulfillmentchannel", "returntype"},
 	"reason":    {"returnreason", "reason", "subreason", "customerreturnreason", "returnsubreason"},
 	"reference": {"transactionid", "amazontransactionid", "referenceid", "transactionreference", "transactionreferenceid", "settlementid", "settlementidentifier"},
+	"approval": {"returnapprovaldate"},
+	"completed": {"completeddate"},
+	"out_for_delivery": {"outfordeliverydate"},
+	"sale": {"saleamountrs"},
+	"refund": {"refundrs"},
+	"protection": {"protectionfundrs"},
+	"marketplace_fee": {"marketplacefeerssumvai", "marketplacefeers"},
 }
 
 var flipkartSourceAliases = map[string]map[string][]string{
@@ -48,16 +55,21 @@ var flipkartSourceAliases = map[string]map[string][]string{
 		"order": {"orderid", "orderitemid", "orderunitid", "shipmentid", "returnid"},
 		"sku": {"sku", "sellersku", "merchantsku", "fsn"},
 		"date": {"returncreationdate", "returnrequesteddate", "returnrequestdate", "returndate", "createddate"},
-		"updated": {"lastupdateddate", "lastupdatedon", "statusupdateddate", "updateddate", "returncreationdate"},
-		"delivered": {"returndelivereddate", "delivereddatetoseller", "receiveddate"},
+		"updated": {"lastupdateddate", "lastupdatedon", "statusupdateddate", "updateddate"},
+		"approval": {"returnapprovaldate"},
+		"completed": {"completeddate"},
+		"out_for_delivery": {"outfordeliverydate"},
+		"delivered": {"returndelivereddate", "delivereddatetoseller", "completeddate"},
 		"status": {"returnstatus", "status", "shipmentstatus"},
 		"channel": {"returntype", "deliverytype", "fulfilmenttype"},
-		"reason": {"returnreason", "reason", "subreason", "customerreturnreason"},
+		"reason": {"returnreason", "returnsubreason", "reason", "subreason", "customerreturnreason"},
+		"reference": {"orderitemid"},
 	},
 	"physical": {
 		"order": {"orderid", "orderitemid", "orderunitid", "shipmentid", "returnid"},
 		"sku": {"sku", "sellersku", "fsn"},
 		"date": {"receiveddate", "physicalreceiveddate", "returndate", "date"},
+		"reference": {"orderitemid"},
 	},
 	"payment": {
 		"order": {"orderid", "orderitemid", "orderunitid", "shipmentid"},
@@ -65,7 +77,11 @@ var flipkartSourceAliases = map[string]map[string][]string{
 		"date": {"paymentdate", "transactiondate", "settlementdate", "date"},
 		"type": {"transactiontype", "paymenttype", "type", "description"},
 		"amount": {"amount", "totalamount", "netamount", "settlementvalue", "total"},
-		"reference": {"transactionid", "referenceid", "settlementid", "claimid"},
+		"reference": {"orderitemid", "transactionid", "referenceid", "settlementid", "claimid"},
+		"sale": {"saleamountrs"},
+		"refund": {"refundrs"},
+		"protection": {"protectionfundrs"},
+		"marketplace_fee": {"marketplacefeerssumvai", "marketplacefeers"},
 	},
 }
 
@@ -88,7 +104,7 @@ var sourceAliases = map[string]map[string][]string{
 	},
 }
 
-var fieldOrder = []string{"order", "sku", "date", "updated", "delivered", "status", "type", "amount", "quantity", "channel", "reason", "reference"}
+var fieldOrder = []string{"order", "sku", "date", "updated", "approval", "completed", "out_for_delivery", "delivered", "status", "type", "amount", "sale", "refund", "protection", "marketplace_fee", "quantity", "channel", "reason", "reference"}
 
 func fields(row []string, kind, marketplace string) map[string]int {
 	m := map[string]int{}
@@ -119,18 +135,25 @@ func fields(row []string, kind, marketplace string) map[string]int {
 	}
 	return m
 }
-func validHeader(m map[string]int, kind string) bool {
+func validHeader(m map[string]int, kind, marketplace string) bool {
 	if _, ok := m["order"]; !ok {
 		return false
 	}
-	if _, ok := m["sku"]; kind != "payment" && !ok {
+	if _, ok := m["sku"]; kind == "website" && !ok {
 		return false
 	}
+	if _, ok := m["sku"]; kind == "physical" && !strings.EqualFold(marketplace, "flipkart") && !ok { return false }
 	required := []string{}
 	switch kind {
 	case "website":
-		required = []string{"updated", "status"}
+		if strings.EqualFold(marketplace, "flipkart") { required = []string{"date", "status"} } else { required = []string{"updated", "status"} }
 	case "payment":
+		if strings.EqualFold(marketplace, "flipkart") {
+			if _, ok := m["date"]; !ok { return false }
+			_, hasType := m["type"]; _, hasAmount := m["amount"]
+			_, hasSale := m["sale"]; _, hasRefund := m["refund"]; _, hasProtection := m["protection"]
+			return (hasType && hasAmount) || hasSale || hasRefund || hasProtection
+		}
 		required = []string{"date", "type", "amount"}
 	}
 	for _, k := range required {
@@ -146,7 +169,7 @@ func ParseDate(s string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("date is missing")
 	}
 	s = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(s, " IST"), " UTC"), " GMT+05:30")
-	for _, f := range []string{time.RFC3339, "2006-01-02 15:04:05-07:00", "2006-01-02 15:04:05", "2006-01-02", "02-Jan-2006", "2-Jan-2006", "02 Jan 2006 15:04:05", "2 Jan 2006 15:04:05", "02-Jan-2006 15:04:05", "2 Jan 2006 3:04:05 PM", "2 Jan 2006 3:04:05 pm", "02/01/2006 15:04:05", "02/01/2006", "2/1/2006", "02.01.2006 15:04:05", "2.1.2006 15:04:05", "02.01.2006", "2.1.2006", "02-01-2006", "2-1-2006", "01/02/06", "Jan 2, 2006 3:04:05 PM"} {
+	for _, f := range []string{time.RFC3339, "2006-01-02 15:04:05-07:00", "2006-01-02 15:04:05", "2006-01-02", "02-Jan-2006", "2-Jan-2006", "2 January, 2006", "02 January, 2006", "2 Jan, 2006", "02 Jan, 2006", "02 Jan 2006 15:04:05", "2 Jan 2006 15:04:05", "02-Jan-2006 15:04:05", "2 Jan 2006 3:04:05 PM", "2 Jan 2006 3:04:05 pm", "02/01/2006 15:04:05", "02/01/2006", "2/1/2006", "02.01.2006 15:04:05", "2.1.2006 15:04:05", "02.01.2006", "2.1.2006", "02-01-2006", "2-1-2006", "01/02/06", "Jan 2, 2006 3:04:05 PM"} {
 		if t, e := time.ParseInLocation(f, s, domain.IST); e == nil {
 			return t, nil
 		}
@@ -192,7 +215,7 @@ func sheetMonth(sheet, fallback string) (time.Time, error) {
 }
 func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 	var st Stats
-	parseSheet := func(name string, next func() ([]string, error)) error {
+	parseSheet := func(name string, optional bool, next func() ([]string, error)) error {
 		var cols map[string]int
 		var previous string
 		line := 0
@@ -219,13 +242,14 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 			}
 			sawContent = true
 			possible := fields(cells, o.Kind, o.Marketplace)
-			if validHeader(possible, o.Kind) {
+			if validHeader(possible, o.Kind, o.Marketplace) {
 				cols = possible
 				previous = ""
 				continue
 			}
 			if cols == nil {
 				if line > 50 {
+					if optional { return nil }
 					return fmt.Errorf("%s: required %s headers not found in first 50 rows", name, o.Kind)
 				}
 				continue
@@ -255,7 +279,7 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 			if order == "" {
 				return fmt.Errorf("%s row %d: Order ID missing; no previous Order ID in this section", name, line)
 			}
-			if sku == "" && o.Kind != "payment" {
+			if sku == "" && o.Kind != "payment" && !(strings.EqualFold(o.Marketplace, "flipkart") && o.Kind == "physical") {
 				return fmt.Errorf("%s row %d: SKU is missing", name, line)
 			}
 			r := domain.Row{Marketplace: o.Marketplace, Kind: o.Kind, OrderID: order, SKU: sku, Status: get("status"), Reason: get("reason"), Type: get("type"), Channel: get("channel"), ReferenceID: domain.Normalize(get("reference")), Quantity: 1, Source: name, Line: line, Raw: map[string]string{}}
@@ -272,7 +296,13 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 				r.Quantity = v
 			}
 			if o.Kind == "website" {
-				r.Updated, e = ParseDate(get("updated"))
+				updatedValue := get("updated")
+				if strings.EqualFold(o.Marketplace, "flipkart") {
+					for _, candidate := range []string{get("completed"), get("out_for_delivery"), get("approval"), get("date")} {
+						if candidate != "" { updatedValue = candidate; break }
+					}
+				}
+				r.Updated, e = ParseDate(updatedValue)
 				if e != nil {
 					return fmt.Errorf("%s row %d updated date: %w", name, line, e)
 				}
@@ -304,6 +334,22 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 					return e
 				}
 			}
+			if o.Kind == "payment" && strings.EqualFold(o.Marketplace, "flipkart") {
+				_, hasSale := cols["sale"]; _, hasRefund := cols["refund"]; _, hasProtection := cols["protection"]
+				if hasSale || hasRefund || hasProtection {
+					for _, transaction := range []struct{ Type, Field string }{{"SALE", "sale"}, {"REFUND", "refund"}, {"SPF REIMBURSEMENT", "protection"}} {
+						amount, parseErr := domain.Money(get(transaction.Field))
+						if parseErr != nil { return fmt.Errorf("%s row %d %s: %w", name, line, transaction.Field, parseErr) }
+						if amount == 0 { continue }
+						payment := r; payment.Type = transaction.Type; payment.Amount = amount
+						if e = emit(payment); e != nil { return e }; st.Rows++
+					}
+					fee, parseErr := domain.Money(get("marketplace_fee"))
+					if parseErr != nil { return fmt.Errorf("%s row %d marketplace fee: %w", name, line, parseErr) }
+					if fee > 0 { payment := r; payment.Type = "FEE REFUND"; payment.Amount = fee; if e = emit(payment); e != nil { return e }; st.Rows++ }
+					continue
+				}
+			}
 			if o.Kind == "payment" {
 				r.Amount, e = domain.Money(get("amount"))
 				if e != nil {
@@ -322,6 +368,7 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 			return nil
 		}
 		if cols == nil {
+			if optional { return nil }
 			return fmt.Errorf("%s: required headers missing", name)
 		}
 		st.Sheets++
@@ -333,12 +380,13 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 			return e
 		}
 		defer f.Close()
-		for _, s := range f.GetSheetList() {
+		sheets := f.GetSheetList()
+		for _, s := range sheets {
 			rows, e := f.Rows(s)
 			if e != nil {
 				return e
 			}
-			err := parseSheet(s, func() ([]string, error) {
+			err := parseSheet(s, strings.EqualFold(o.Marketplace, "flipkart") && len(sheets) > 1, func() ([]string, error) {
 				if !rows.Next() {
 					if e := rows.Error(); e != nil {
 						return nil, e
@@ -384,7 +432,7 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 			}
 			return v, nil
 		}
-		return parseSheet(name, next)
+		return parseSheet(name, false, next)
 	}
 	switch strings.ToLower(filepath.Ext(o.Filename)) {
 	case ".xlsx":
@@ -393,12 +441,13 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 			return st, e
 		}
 		defer f.Close()
-		for _, s := range f.GetSheetList() {
+		sheets := f.GetSheetList()
+		for _, s := range sheets {
 			rows, e := f.Rows(s)
 			if e != nil {
 				return st, e
 			}
-			err := parseSheet(s, func() ([]string, error) {
+			err := parseSheet(s, strings.EqualFold(o.Marketplace, "flipkart") && len(sheets) > 1, func() ([]string, error) {
 				if !rows.Next() {
 					if e := rows.Error(); e != nil {
 						return nil, e

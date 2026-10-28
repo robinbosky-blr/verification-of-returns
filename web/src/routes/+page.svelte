@@ -279,33 +279,37 @@
   }
   async function upload(kind: string, event: Event) {
     const input = event.target as HTMLInputElement;
-    const f = input.files?.[0];
-    if (!f) return;
+    const files = [...(input.files ?? [])];
+    if (!files.length) return;
     uploading = kind;
     error = '';
     notice = '';
     try {
       if (browserMode) {
-        const imported = await importBrowserFile(browserState, marketplace, kind, f, coverage);
-        browserState = imported.state;
-        notice = imported.duplicate
-          ? 'This file has already been imported. No duplicate data was added.'
-          : `${f.name} imported successfully. ${number(imported.imported.rows)} rows were processed and the dashboard was recalculated.`;
+        let nextState = browserState;
+        let importedFiles = 0, duplicateFiles = 0, processedRows = 0;
+        for (const file of files) {
+          const imported = await importBrowserFile(nextState, marketplace, kind, file, coverage);
+          nextState = imported.state;
+          if (imported.duplicate) duplicateFiles++;
+          else { importedFiles++; processedRows += imported.imported.rows; }
+        }
+        browserState = nextState;
+        notice = `${number(importedFiles)} file${importedFiles === 1 ? '' : 's'} imported. ${number(processedRows)} rows were processed and the dashboard was recalculated.${duplicateFiles ? ` ${number(duplicateFiles)} duplicate file${duplicateFiles === 1 ? '' : 's'} skipped.` : ''}`;
         refreshBrowser();
         return;
       }
-      const data = new FormData();
-      data.append('kind', kind);
-      data.append('marketplace', marketplace);
-      data.append('file', f);
-      if (coverage) data.append('month', coverage);
-      const r = await api<{ duplicate: boolean; import: Import }>('/imports', {
-        method: 'POST',
-        body: data
-      });
-      notice = r.duplicate
-        ? 'This file has already been imported. No duplicate data was added.'
-        : 'File preserved. Processing is queued in the background.';
+      let queued = 0, duplicates = 0;
+      for (const file of files) {
+        const data = new FormData();
+        data.append('kind', kind);
+        data.append('marketplace', marketplace);
+        data.append('file', file);
+        if (coverage) data.append('month', coverage);
+        const r = await api<{ duplicate: boolean; import: Import }>('/imports', { method: 'POST', body: data });
+        if (r.duplicate) duplicates++; else queued++;
+      }
+      notice = `${number(queued)} file${queued === 1 ? '' : 's'} preserved and queued for processing.${duplicates ? ` ${number(duplicates)} duplicate file${duplicates === 1 ? '' : 's'} skipped.` : ''}`;
       await load();
     } catch (e) {
       error = (e as Error).message;
@@ -907,9 +911,10 @@
                 <label class="dropzone"
                   ><CloudUpload size={27} /><strong
                     >{uploading === c.kind ? 'Uploading…' : 'Choose a file to upload'}</strong
-                  ><span>CSV, Excel workbook or supported ZIP</span><input
+                  ><span>CSV, Excel workbook or supported ZIP · multiple files allowed</span><input
                     aria-label={'Upload ' + c.title}
                     type="file"
+                    multiple
                     accept=".csv,.xlsx,.zip"
                     disabled={!!uploading}
                     onchange={(e) => void upload(c.kind, e)}

@@ -13,16 +13,29 @@ func reconcileFlipkart(rows []Row, now time.Time) ([]Result, error) {
 	websites := map[string][]Row{}
 	physical := map[string][]Row{}
 	payments := map[string][]Row{}
+	orderKeys := map[string]map[string]struct{}{}
+	itemKeys := map[string]map[string]struct{}{}
 	for _, row := range rows {
+		if row.Kind != "website" { continue }
 		key := Key(row.OrderID, row.SKU)
-		switch row.Kind {
-		case "website":
-			websites[key] = append(websites[key], row)
-		case "physical":
-			physical[key] = append(physical[key], row)
-		case "payment":
-			payments[key] = append(payments[key], row)
-		}
+		websites[key] = append(websites[key], row)
+		if orderKeys[row.OrderID] == nil { orderKeys[row.OrderID] = map[string]struct{}{} }
+		orderKeys[row.OrderID][key] = struct{}{}
+		if row.ReferenceID != "" { if itemKeys[row.ReferenceID] == nil { itemKeys[row.ReferenceID] = map[string]struct{}{} }; itemKeys[row.ReferenceID][key] = struct{}{} }
+	}
+	uniqueKey := func(keys map[string]struct{}) string { if len(keys) != 1 { return "" }; for key := range keys { return key }; return "" }
+	resolve := func(row Row) string {
+		if row.SKU != "" { key := Key(row.OrderID, row.SKU); if _, ok := websites[key]; ok { return key } }
+		if row.ReferenceID != "" { if key := uniqueKey(itemKeys[row.ReferenceID]); key != "" { return key } }
+		return uniqueKey(orderKeys[row.OrderID])
+	}
+	ambiguous := map[string]int{}
+	for _, row := range rows {
+		if row.Kind == "website" { continue }
+		key := resolve(row)
+		if key == "" { ambiguous[row.OrderID]++; continue }
+		if row.Kind == "physical" { physical[key] = append(physical[key], row) }
+		if row.Kind == "payment" { payments[key] = append(payments[key], row) }
 	}
 	out := make([]Result, 0, len(websites))
 	for key, events := range websites {
@@ -48,6 +61,7 @@ func reconcileFlipkart(rows []Row, now time.Time) ([]Result, error) {
 			Receipt: "Not Received", Financial: "Payment Data Missing", ClaimStatus: "Review",
 			RuleVersion: FlipkartRuleVersion, Evidence: append([]Row{}, events...), Notes: []string{},
 		}
+		if count := ambiguous[latest.OrderID]; count > 0 { result.Notes = append(result.Notes, fmt.Sprintf("%d Flipkart row(s) need Order Item ID or SKU for allocation", count)) }
 		if received {
 			result.Receipt = "Received"
 			result.ReceivedMonth = Month(receivedRows[0].Date)

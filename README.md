@@ -53,7 +53,7 @@ Missing data and ambiguous transactions remain visible as **Payment Data Missing
 
 ## Architecture and operations
 
-See [docs/architecture.md](docs/architecture.md), [docs/operations.md](docs/operations.md), and [docs/validation.md](docs/validation.md).
+See [docs/architecture.md](docs/architecture.md), [docs/operations.md](docs/operations.md), [docs/validation.md](docs/validation.md), and the verified [Flipkart source-file mapping](docs/flipkart-file-mapping.md).
 
 ```text
 web/       SvelteKit static UI, Caddy proxy

@@ -60,3 +60,14 @@ func TestMarketplaceEnginesStaySeparate(t *testing.T) {
 		t.Fatalf("amazon=%q flipkart=%q", amazon[0].RuleVersion, flipkart[0].RuleVersion)
 	}
 }
+
+func TestFlipkartAllocatesOrderOnlyPhysicalAndItemPayment(t *testing.T) {
+	rows := []Row{
+		{Kind: "website", OrderID: "OD4", SKU: "SKU4", ReferenceID: "ITEM4", Date: flipkartDate("2026-07-01"), Updated: flipkartDate("2026-07-02"), Status: "delivered"},
+		{Kind: "physical", OrderID: "OD4", Date: flipkartDate("2026-07-20")},
+		{Kind: "payment", OrderID: "OD4", ReferenceID: "ITEM4", Date: flipkartDate("2026-07-29"), Type: "REFUND", Amount: -21200},
+	}
+	results, err := ReconcileMarketplace("flipkart", rows, flipkartDate("2026-08-01"))
+	if err != nil || len(results) != 1 { t.Fatal(results, err) }
+	if results[0].Receipt != "Received" || results[0].RefundTotal != -21200 || results[0].Loss != 21200 { t.Fatal(results[0]) }
+}
