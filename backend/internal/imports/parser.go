@@ -16,7 +16,7 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
-type Options struct{ Kind, Filename, Month string }
+type Options struct{ Marketplace, Kind, Filename, Month string }
 type Stats struct {
 	Rows   int `json:"rows"`
 	Sheets int `json:"sheets"`
@@ -39,7 +39,34 @@ var aliases = map[string][]string{
 	"amount":    {"total", "totalinr", "totalamount", "amount", "transactionamount", "transactiontotal", "netamount", "netproceeds", "nettotal"},
 	"quantity":  {"quantity", "qty", "returnquantity"},
 	"channel":   {"fulfilment", "fulfillment", "fulfilmentchannel", "fulfillmentchannel", "returntype"},
+	"reason":    {"returnreason", "reason", "subreason", "customerreturnreason", "returnsubreason"},
 	"reference": {"transactionid", "amazontransactionid", "referenceid", "transactionreference", "transactionreferenceid", "settlementid", "settlementidentifier"},
+}
+
+var flipkartSourceAliases = map[string]map[string][]string{
+	"website": {
+		"order": {"orderid", "orderitemid", "orderunitid", "shipmentid", "returnid"},
+		"sku": {"sku", "sellersku", "merchantsku", "fsn"},
+		"date": {"returncreationdate", "returnrequesteddate", "returnrequestdate", "returndate", "createddate"},
+		"updated": {"lastupdateddate", "lastupdatedon", "statusupdateddate", "updateddate", "returncreationdate"},
+		"delivered": {"returndelivereddate", "delivereddatetoseller", "receiveddate"},
+		"status": {"returnstatus", "status", "shipmentstatus"},
+		"channel": {"returntype", "deliverytype", "fulfilmenttype"},
+		"reason": {"returnreason", "reason", "subreason", "customerreturnreason"},
+	},
+	"physical": {
+		"order": {"orderid", "orderitemid", "orderunitid", "shipmentid", "returnid"},
+		"sku": {"sku", "sellersku", "fsn"},
+		"date": {"receiveddate", "physicalreceiveddate", "returndate", "date"},
+	},
+	"payment": {
+		"order": {"orderid", "orderitemid", "orderunitid", "shipmentid"},
+		"sku": {"sku", "sellersku", "fsn"},
+		"date": {"paymentdate", "transactiondate", "settlementdate", "date"},
+		"type": {"transactiontype", "paymenttype", "type", "description"},
+		"amount": {"amount", "totalamount", "netamount", "settlementvalue", "total"},
+		"reference": {"transactionid", "referenceid", "settlementid", "claimid"},
+	},
 }
 
 var sourceAliases = map[string]map[string][]string{
@@ -61,9 +88,9 @@ var sourceAliases = map[string]map[string][]string{
 	},
 }
 
-var fieldOrder = []string{"order", "sku", "date", "updated", "delivered", "status", "type", "amount", "quantity", "channel", "reference"}
+var fieldOrder = []string{"order", "sku", "date", "updated", "delivered", "status", "type", "amount", "quantity", "channel", "reason", "reference"}
 
-func fields(row []string, kind string) map[string]int {
+func fields(row []string, kind, marketplace string) map[string]int {
 	m := map[string]int{}
 	headers := make([]string, len(row))
 	for i, s := range row {
@@ -71,7 +98,11 @@ func fields(row []string, kind string) map[string]int {
 	}
 	for _, field := range fieldOrder {
 		candidates := aliases[field]
-		if configured, ok := sourceAliases[kind][field]; ok {
+		configuredAliases := sourceAliases
+		if strings.EqualFold(marketplace, "flipkart") {
+			configuredAliases = flipkartSourceAliases
+		}
+		if configured, ok := configuredAliases[kind][field]; ok {
 			candidates = configured
 		}
 		for _, candidate := range candidates {
@@ -187,7 +218,7 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 				continue
 			}
 			sawContent = true
-			possible := fields(cells, o.Kind)
+			possible := fields(cells, o.Kind, o.Marketplace)
 			if validHeader(possible, o.Kind) {
 				cols = possible
 				previous = ""
@@ -227,7 +258,7 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 			if sku == "" && o.Kind != "payment" {
 				return fmt.Errorf("%s row %d: SKU is missing", name, line)
 			}
-			r := domain.Row{Kind: o.Kind, OrderID: order, SKU: sku, Status: get("status"), Type: get("type"), Channel: get("channel"), ReferenceID: domain.Normalize(get("reference")), Quantity: 1, Source: name, Line: line, Raw: map[string]string{}}
+			r := domain.Row{Marketplace: o.Marketplace, Kind: o.Kind, OrderID: order, SKU: sku, Status: get("status"), Reason: get("reason"), Type: get("type"), Channel: get("channel"), ReferenceID: domain.Normalize(get("reference")), Quantity: 1, Source: name, Line: line, Raw: map[string]string{}}
 			for k, i := range cols {
 				if i < len(cells) {
 					r.Raw[k] = cells[i]

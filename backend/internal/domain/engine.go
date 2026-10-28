@@ -9,6 +9,23 @@ import (
 
 // Reconcile is deterministic: money is integer paise, dates are calendar days in IST.
 func Reconcile(rows []Row, now time.Time) ([]Result, error) {
+	return reconcileAmazon(rows, now)
+}
+
+// ReconcileMarketplace is the hard boundary between marketplace rule engines.
+// Amazon and Flipkart never share date, status, payment, or claim calculations.
+func ReconcileMarketplace(marketplace string, rows []Row, now time.Time) ([]Result, error) {
+	switch strings.ToLower(strings.TrimSpace(marketplace)) {
+	case "amazon", "":
+		return reconcileAmazon(rows, now)
+	case "flipkart":
+		return reconcileFlipkart(rows, now)
+	default:
+		return nil, fmt.Errorf("unsupported marketplace %q", marketplace)
+	}
+}
+
+func reconcileAmazon(rows []Row, now time.Time) ([]Result, error) {
 	websites := map[string][]Row{}
 	physical := map[string][]Row{}
 	payments := map[string][]Row{}
@@ -53,7 +70,7 @@ func Reconcile(rows []Row, now time.Time) ([]Result, error) {
 				first = e.Date
 			}
 		}
-		r := Result{Key: k, OrderID: latest.OrderID, SKU: latest.SKU, Month: Month(first), Status: latest.Status, ReturnDate: first, Updated: latest.Updated, Delivered: latest.Delivered, Receipt: "Not Received", Financial: "Payment Data Missing", ClaimStatus: "Review", RuleVersion: RuleVersion, Evidence: append([]Row{}, events...), Notes: []string{}}
+		r := Result{Marketplace: "amazon", Key: k, OrderID: latest.OrderID, SKU: latest.SKU, Month: Month(first), Status: latest.Status, ReturnDate: first, Updated: latest.Updated, Delivered: latest.Delivered, Receipt: "Not Received", Financial: "Payment Data Missing", ClaimStatus: "Review", RuleVersion: RuleVersion, Evidence: append([]Row{}, events...), Notes: []string{}}
 		next := Month(Day(first).AddDate(0, 1, 0))
 		// AddDate on Jan 31 may skip February; derive next from the first of the month.
 		base, _ := time.ParseInLocation("2006-01", r.Month, IST)
@@ -227,25 +244,6 @@ func Summarize(rs []Result) Summary {
 	s := Summary{}
 	for _, r := range rs {
 		s.Total++
-		if r.Receipt == "Received" {
-			s.Received++
-			continue
-		}
-		s.NotReceived++
-		switch r.Financial {
-		case "Debited", "Partially Reimbursed", "Already Reimbursed":
-			s.Debited++
-		case "Not Debited":
-			s.NotDebited++
-		default:
-			s.Unknown++
-		}
-		if r.Financial == "Already Reimbursed" {
-			s.Reimbursed++
-		}
-		if r.Financial == "Partially Reimbursed" {
-			s.Partial++
-		}
 		manual := r.UserClaimStatus
 		if manual == "" {
 			manual = "Not Raised"
@@ -269,6 +267,25 @@ func Summarize(rs []Result) Summary {
 			s.ClaimRejected++
 		case "Partially Approved":
 			s.ClaimPartialApproved++
+		}
+		if r.Receipt == "Received" {
+			s.Received++
+			continue
+		}
+		s.NotReceived++
+		switch r.Financial {
+		case "Debited", "Partially Reimbursed", "Already Reimbursed":
+			s.Debited++
+		case "Not Debited":
+			s.NotDebited++
+		default:
+			s.Unknown++
+		}
+		if r.Financial == "Already Reimbursed" {
+			s.Reimbursed++
+		}
+		if r.Financial == "Partially Reimbursed" {
+			s.Partial++
 		}
 		if r.Financial == "Not Debited" || r.Financial == "Already Reimbursed" {
 			s.NoLossCases++

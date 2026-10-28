@@ -68,7 +68,8 @@ func (w Worker) Once(ctx context.Context) error {
 	var job int64
 	var id *string
 	var kind string
-	e = tx.QueryRow(ctx, "SELECT id,import_id,kind FROM jobs WHERE status='queued' ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1").Scan(&job, &id, &kind)
+	var marketplace string
+	e = tx.QueryRow(ctx, "SELECT id,import_id,kind,marketplace FROM jobs WHERE status='queued' ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1").Scan(&job, &id, &kind, &marketplace)
 	if errors.Is(e, pgx.ErrNoRows) {
 		return nil
 	}
@@ -78,7 +79,7 @@ func (w Worker) Once(ctx context.Context) error {
 	if _, e = tx.Exec(ctx, "UPDATE jobs SET status='processing',attempts=attempts+1 WHERE id=$1", job); e != nil {
 		return e
 	}
-	e = w.process(ctx, tx, id, kind)
+	e = w.process(ctx, tx, id, kind, marketplace)
 
 	if e != nil {
 
@@ -94,11 +95,11 @@ func (w Worker) Once(ctx context.Context) error {
 			return err
 		}
 		if id != nil && kind == "import" {
-			if _, err = fail.Exec(errctx, "UPDATE imports SET status='failed',error=$2 WHERE id=$1", *id, e.Error()); err != nil {
+			if _, err = fail.Exec(errctx, "UPDATE imports SET status='failed',error=$3 WHERE id=$1 AND marketplace=$2", *id, marketplace, e.Error()); err != nil {
 				return err
 			}
 		}
-		if err = store.Audit(errctx, fail, "job.failed", map[string]any{"job": job, "error": e.Error()}); err != nil {
+		if err = store.AuditMarketplace(errctx, fail, marketplace, "job.failed", map[string]any{"job": job, "error": e.Error()}); err != nil {
 			return err
 		}
 		if err = fail.Commit(errctx); err != nil {
@@ -111,10 +112,10 @@ func (w Worker) Once(ctx context.Context) error {
 	}
 	return tx.Commit(ctx)
 }
-func (w Worker) process(ctx context.Context, tx pgx.Tx, id *string, kind string) error {
+func (w Worker) process(ctx context.Context, tx pgx.Tx, id *string, kind, marketplace string) error {
 	if id != nil && kind == "import" {
 		var filename, key, typ, month string
-		if e := tx.QueryRow(ctx, "SELECT filename,object_key,kind,coverage_month FROM imports WHERE id=$1", *id).Scan(&filename, &key, &typ, &month); e != nil {
+		if e := tx.QueryRow(ctx, "SELECT filename,object_key,kind,coverage_month FROM imports WHERE id=$1 AND marketplace=$2", *id, marketplace).Scan(&filename, &key, &typ, &month); e != nil {
 			return e
 		}
 		path, cleanup, e := w.Files.Materialize(ctx, key)
@@ -130,11 +131,11 @@ func (w Worker) process(ctx context.Context, tx pgx.Tx, id *string, kind string)
 			if len(batch) == 0 {
 				return nil
 			}
-			_, e := tx.CopyFrom(ctx, pgx.Identifier{"import_rows"}, []string{"import_id", "kind", "fingerprint", "occurrence", "order_id", "sku", "row_date", "payload"}, pgx.CopyFromRows(batch))
+			_, e := tx.CopyFrom(ctx, pgx.Identifier{"import_rows"}, []string{"import_id", "marketplace", "kind", "fingerprint", "occurrence", "order_id", "sku", "row_date", "payload"}, pgx.CopyFromRows(batch))
 			batch = batch[:0]
 			return e
 		}
-		_, e = imports.Parse(path, imports.Options{Kind: typ, Filename: filename, Month: month}, func(r domain.Row) error {
+		_, e = imports.Parse(path, imports.Options{Marketplace: marketplace, Kind: typ, Filename: filename, Month: month}, func(r domain.Row) error {
 			sourceRows++
 			if sourceRows > 2000000 {
 				return fmt.Errorf("import exceeds 2 million rows; split the file")
@@ -152,7 +153,7 @@ func (w Worker) process(ctx context.Context, tx pgx.Tx, id *string, kind string)
 			if e != nil {
 				return e
 			}
-			batch = append(batch, []any{*id, typ, fp, occ, r.OrderID, r.SKU, domain.Day(r.Date), b})
+			batch = append(batch, []any{*id, marketplace, typ, fp, occ, r.OrderID, r.SKU, domain.Day(r.Date), b})
 			total++
 			if len(batch) == 1000 {
 				return flush()
@@ -165,14 +166,14 @@ func (w Worker) process(ctx context.Context, tx pgx.Tx, id *string, kind string)
 		if e = flush(); e != nil {
 			return e
 		}
-		if _, e = tx.Exec(ctx, "UPDATE imports SET status='completed',rows_count=$2,completed_at=now() WHERE id=$1", *id, sourceRows); e != nil {
+		if _, e = tx.Exec(ctx, "UPDATE imports SET status='completed',rows_count=$3,completed_at=now() WHERE id=$1 AND marketplace=$2", *id, marketplace, sourceRows); e != nil {
 			return e
 		}
 	}
 	// Recompute affected orders only, including every SKU to protect order-level allocation.
 	var orders []string
 	if id != nil {
-		rr, e := tx.Query(ctx, "SELECT DISTINCT order_id FROM import_rows WHERE import_id=$1", *id)
+		rr, e := tx.Query(ctx, "SELECT DISTINCT order_id FROM import_rows WHERE import_id=$1 AND marketplace=$2", *id, marketplace)
 		if e != nil {
 			return e
 		}
@@ -193,7 +194,7 @@ func (w Worker) process(ctx context.Context, tx pgx.Tx, id *string, kind string)
 			return nil
 		}
 	}
-	rows, e := tx.Query(ctx, `SELECT DISTINCT ON (r.kind,r.fingerprint,r.occurrence) r.payload,i.created_at FROM import_rows r JOIN imports i ON i.id=r.import_id WHERE i.status='completed' AND i.active AND ($1::text[] IS NULL OR r.order_id=ANY($1)) ORDER BY r.kind,r.fingerprint,r.occurrence,i.created_at DESC`, orders)
+	rows, e := tx.Query(ctx, `SELECT DISTINCT ON (r.kind,r.fingerprint,r.occurrence) r.payload,i.created_at FROM import_rows r JOIN imports i ON i.id=r.import_id AND i.marketplace=r.marketplace WHERE r.marketplace=$1 AND i.status='completed' AND i.active AND ($2::text[] IS NULL OR r.order_id=ANY($2)) ORDER BY r.kind,r.fingerprint,r.occurrence,i.created_at DESC`, marketplace, orders)
 	if e != nil {
 		return e
 	}
@@ -218,7 +219,7 @@ func (w Worker) process(ctx context.Context, tx pgx.Tx, id *string, kind string)
 	if e != nil {
 		return e
 	}
-	results, e := domain.Reconcile(data, time.Now())
+	results, e := domain.ReconcileMarketplace(marketplace, data, time.Now())
 	if e != nil {
 		return e
 	}
@@ -228,10 +229,12 @@ func (w Worker) process(ctx context.Context, tx pgx.Tx, id *string, kind string)
 		return e
 	}
 	var run int64
-	if e = tx.QueryRow(ctx, "INSERT INTO reconciliation_runs(rule_version,status,summary,completed_at) VALUES($1,'completed',$2,now()) RETURNING id", domain.RuleVersion, string(sb)).Scan(&run); e != nil {
+	ruleVersion := domain.RuleVersion
+	if marketplace == "flipkart" { ruleVersion = domain.FlipkartRuleVersion }
+	if e = tx.QueryRow(ctx, "INSERT INTO reconciliation_runs(marketplace,rule_version,status,summary,completed_at) VALUES($1,$2,'completed',$3,now()) RETURNING id", marketplace, ruleVersion, string(sb)).Scan(&run); e != nil {
 		return e
 	}
-	if _, e = tx.Exec(ctx, "DELETE FROM results WHERE ($1::text[] IS NULL OR order_id=ANY($1))", orders); e != nil {
+	if _, e = tx.Exec(ctx, "DELETE FROM results WHERE marketplace=$1 AND ($2::text[] IS NULL OR order_id=ANY($2))", marketplace, orders); e != nil {
 		return e
 	}
 	batch := make([][]any, 0, len(results))
@@ -240,12 +243,12 @@ func (w Worker) process(ctx context.Context, tx pgx.Tx, id *string, kind string)
 		if e != nil {
 			return e
 		}
-		batch = append(batch, []any{r.Key, r.OrderID, r.SKU, r.Month, r.Receipt, r.Financial, run, b})
+		batch = append(batch, []any{marketplace, r.Key, r.OrderID, r.SKU, r.Month, r.Receipt, r.Financial, run, b})
 	}
 	if len(batch) > 0 {
-		if _, e = tx.CopyFrom(ctx, pgx.Identifier{"results"}, []string{"case_key", "order_id", "sku", "month", "receipt", "financial", "run_id", "payload"}, pgx.CopyFromRows(batch)); e != nil {
+		if _, e = tx.CopyFrom(ctx, pgx.Identifier{"results"}, []string{"marketplace", "case_key", "order_id", "sku", "month", "receipt", "financial", "run_id", "payload"}, pgx.CopyFromRows(batch)); e != nil {
 			return e
 		}
 	}
-	return store.Audit(ctx, tx, "reconciliation.completed", map[string]any{"run_id": run, "rule_version": domain.RuleVersion, "affected_orders": len(orders), "summary": summary})
+	return store.AuditMarketplace(ctx, tx, marketplace, "reconciliation.completed", map[string]any{"run_id": run, "rule_version": ruleVersion, "affected_orders": len(orders), "summary": summary})
 }

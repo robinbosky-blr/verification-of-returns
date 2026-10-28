@@ -9,10 +9,12 @@ import (
 )
 
 const RuleVersion = "amazon-seller-v1"
+const FlipkartRuleVersion = "flipkart-spf-v1"
 
 var IST = time.FixedZone("Asia/Kolkata", 19800)
 
 type Row struct {
+	Marketplace string            `json:"marketplace"`
 	Kind        string            `json:"kind"`
 	OrderID     string            `json:"order_id"`
 	SKU         string            `json:"sku"`
@@ -20,6 +22,7 @@ type Row struct {
 	Updated     time.Time         `json:"updated"`
 	Delivered   time.Time         `json:"delivered"`
 	Status      string            `json:"status"`
+	Reason      string            `json:"reason"`
 	Type        string            `json:"type"`
 	Channel     string            `json:"channel"`
 	ReferenceID string            `json:"reference_id"`
@@ -89,6 +92,7 @@ func Money(s string) (int64, error) {
 }
 
 type Result struct {
+	Marketplace          string    `json:"marketplace"`
 	Key                  string    `json:"key"`
 	OrderID              string    `json:"order_id"`
 	SKU                  string    `json:"sku"`

@@ -36,6 +36,14 @@ type Server struct {
 	attempts map[string][]time.Time
 }
 
+func marketplace(r *http.Request) string {
+	value := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("marketplace")))
+	if value == "" && r.Method == http.MethodPost { value = strings.ToLower(strings.TrimSpace(r.FormValue("marketplace"))) }
+	if value == "" { return "amazon" }
+	if value == "amazon" || value == "flipkart" { return value }
+	return ""
+}
+
 func JSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -65,7 +73,8 @@ func (s *Server) Handler() http.Handler {
 		JSON(w, 200, map[string]bool{"ok": true})
 	})
 	m.HandleFunc("GET /api/imports", func(w http.ResponseWriter, r *http.Request) {
-		v, e := s.DB.Imports(r.Context())
+		market := marketplace(r); if market == "" { fail(w, 400, "Unsupported marketplace"); return }
+		v, e := s.DB.Imports(r.Context(), market)
 		if e != nil {
 			fail(w, 500, "Could not load imports")
 			return
@@ -74,6 +83,7 @@ func (s *Server) Handler() http.Handler {
 	})
 	m.HandleFunc("POST /api/imports", s.upload)
 	m.HandleFunc("POST /api/imports/{id}/active", func(w http.ResponseWriter, r *http.Request) {
+		market := marketplace(r); if market == "" { fail(w, 400, "Unsupported marketplace"); return }
 		var b struct {
 			Active bool `json:"active"`
 		}
@@ -81,14 +91,15 @@ func (s *Server) Handler() http.Handler {
 			fail(w, 400, "Invalid request")
 			return
 		}
-		if e := s.DB.SetActive(r.Context(), r.PathValue("id"), b.Active); e != nil {
+		if e := s.DB.SetActive(r.Context(), market, r.PathValue("id"), b.Active); e != nil {
 			fail(w, 400, e.Error())
 			return
 		}
 		JSON(w, 202, map[string]string{"status": "queued"})
 	})
 	m.HandleFunc("DELETE /api/imports/{id}", func(w http.ResponseWriter, r *http.Request) {
-		imported, e := s.DB.DeleteImport(r.Context(), r.PathValue("id"))
+		market := marketplace(r); if market == "" { fail(w, 400, "Unsupported marketplace"); return }
+		imported, e := s.DB.DeleteImport(r.Context(), market, r.PathValue("id"))
 		if errors.Is(e, pgx.ErrNoRows) {
 			fail(w, 404, "Import not found")
 			return
@@ -106,7 +117,8 @@ func (s *Server) Handler() http.Handler {
 		JSON(w, 202, map[string]string{"status": "queued"})
 	})
 	m.HandleFunc("POST /api/reconcile", func(w http.ResponseWriter, r *http.Request) {
-		if e := s.DB.Enqueue(r.Context()); e != nil {
+		market := marketplace(r); if market == "" { fail(w, 400, "Unsupported marketplace"); return }
+		if e := s.DB.Enqueue(r.Context(), market); e != nil {
 			fail(w, 500, "Could not queue reconciliation")
 			return
 		}
@@ -114,7 +126,8 @@ func (s *Server) Handler() http.Handler {
 	})
 	m.HandleFunc("GET /api/results", s.results)
 	m.HandleFunc("GET /api/case", func(w http.ResponseWriter, r *http.Request) {
-		v, e := s.DB.Detail(r.Context(), r.URL.Query().Get("key"))
+		market := marketplace(r); if market == "" { fail(w, 400, "Unsupported marketplace"); return }
+		v, e := s.DB.Detail(r.Context(), market, r.URL.Query().Get("key"))
 		if errors.Is(e, pgx.ErrNoRows) {
 			fail(w, 404, "Case not found")
 			return
@@ -131,6 +144,7 @@ func (s *Server) Handler() http.Handler {
 			fail(w, 400, "Invalid claim update")
 			return
 		}
+		a.Marketplace = marketplace(r); if a.Marketplace == "" { fail(w, 400, "Unsupported marketplace"); return }
 		v, e := s.DB.UpdateClaim(r.Context(), a, "Admin")
 		if e != nil {
 			fail(w, 400, e.Error())
@@ -139,7 +153,8 @@ func (s *Server) Handler() http.Handler {
 		JSON(w, 200, v)
 	})
 	m.HandleFunc("GET /api/case/claim-history", func(w http.ResponseWriter, r *http.Request) {
-		v, e := s.DB.ClaimHistory(r.Context(), r.URL.Query().Get("key"))
+		market := marketplace(r); if market == "" { fail(w, 400, "Unsupported marketplace"); return }
+		v, e := s.DB.ClaimHistory(r.Context(), market, r.URL.Query().Get("key"))
 		if e != nil {
 			fail(w, 400, e.Error())
 			return
@@ -148,20 +163,23 @@ func (s *Server) Handler() http.Handler {
 	})
 	m.HandleFunc("GET /api/export", s.export)
 	m.HandleFunc("GET /api/meta", func(w http.ResponseWriter, r *http.Request) {
-		v, e := s.DB.JSONRows(r.Context(), `SELECT jsonb_build_object('month',month,'count',count(*)) FROM results GROUP BY month ORDER BY month DESC`)
+		market := marketplace(r); if market == "" { fail(w, 400, "Unsupported marketplace"); return }
+		v, e := s.DB.JSONRows(r.Context(), fmt.Sprintf(`SELECT jsonb_build_object('month',month,'count',count(*)) FROM results WHERE marketplace='%s' GROUP BY month ORDER BY month DESC`, market))
 		if e != nil {
 			fail(w, 500, "Could not load months")
 			return
 		}
-		jobs, e := s.DB.JSONRows(r.Context(), `SELECT to_jsonb(j) FROM (SELECT id,kind,status,error,created_at,finished_at FROM jobs ORDER BY id DESC LIMIT 25) j`)
+		jobs, e := s.DB.JSONRows(r.Context(), fmt.Sprintf(`SELECT to_jsonb(j) FROM (SELECT id,kind,status,error,created_at,finished_at FROM jobs WHERE marketplace='%s' ORDER BY id DESC LIMIT 25) j`, market))
 		if e != nil {
 			fail(w, 500, "Could not load jobs")
 			return
 		}
-		JSON(w, 200, map[string]any{"months": v, "jobs": jobs, "rule_version": domain.RuleVersion})
+		rule := domain.RuleVersion; if market == "flipkart" { rule = domain.FlipkartRuleVersion }
+		JSON(w, 200, map[string]any{"months": v, "jobs": jobs, "rule_version": rule})
 	})
 	m.HandleFunc("GET /api/audit", func(w http.ResponseWriter, r *http.Request) {
-		v, e := s.DB.JSONRows(r.Context(), "SELECT to_jsonb(a) FROM (SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200) a")
+		market := marketplace(r); if market == "" { fail(w, 400, "Unsupported marketplace"); return }
+		v, e := s.DB.JSONRows(r.Context(), fmt.Sprintf("SELECT to_jsonb(a) FROM (SELECT * FROM audit_logs WHERE marketplace='%s' ORDER BY id DESC LIMIT 200) a", market))
 		if e != nil {
 			fail(w, 500, "Could not load audit log")
 			return
@@ -169,7 +187,8 @@ func (s *Server) Handler() http.Handler {
 		JSON(w, 200, v)
 	})
 	m.HandleFunc("GET /api/rules", func(w http.ResponseWriter, r *http.Request) {
-		v, e := s.DB.JSONRows(r.Context(), "SELECT to_jsonb(c) FROM claim_rules c ORDER BY created_at DESC")
+		market := marketplace(r); if market == "" { fail(w, 400, "Unsupported marketplace"); return }
+		v, e := s.DB.JSONRows(r.Context(), fmt.Sprintf("SELECT to_jsonb(c) FROM claim_rules c WHERE marketplace='%s' ORDER BY created_at DESC", market))
 		if e != nil {
 			fail(w, 500, "Could not load rules")
 			return
@@ -253,6 +272,11 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.MultipartForm.RemoveAll()
+	market := marketplace(r)
+	if market == "" {
+		fail(w, 400, "Choose Amazon or Flipkart")
+		return
+	}
 	kind := r.FormValue("kind")
 	if kind != "website" && kind != "physical" && kind != "payment" {
 		fail(w, 400, "Choose website, physical, or payment")
@@ -289,13 +313,13 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	digest := hex.EncodeToString(hash.Sum(nil))
-	key := kind + "/" + digest + ext
+	key := market + "/" + kind + "/" + digest + ext
 	if e = s.Files.Put(r.Context(), key, tmp.Name()); e != nil {
 		slog.Error("store upload", "error", e)
 		fail(w, 500, "Could not preserve original file")
 		return
 	}
-	imp, duplicate, e := s.DB.CreateImport(r.Context(), store.Import{ID: store.ID(), Kind: kind, Filename: filepath.Base(h.Filename), Hash: digest, Object: key, Month: r.FormValue("month")})
+	imp, duplicate, e := s.DB.CreateImport(r.Context(), store.Import{ID: store.ID(), Marketplace: market, Kind: kind, Filename: filepath.Base(h.Filename), Hash: digest, Object: key, Month: r.FormValue("month")})
 	if e != nil {
 		slog.Error("queue upload", "error", e)
 		fail(w, 500, "Could not queue import")
@@ -305,10 +329,12 @@ func (s *Server) upload(w http.ResponseWriter, r *http.Request) {
 }
 func filter(r *http.Request) store.Filter {
 	q := r.URL.Query()
-	return store.Filter{Month: q.Get("month"), Year: q.Get("year"), Search: q.Get("search"), Receipt: q.Get("receipt"), Financial: q.Get("financial"), Claim: q.Get("claim"), UserClaim: q.Get("claim_status"), Status: q.Get("status"), SKU: q.Get("sku")}
+	return store.Filter{Marketplace: marketplace(r), Month: q.Get("month"), Year: q.Get("year"), Search: q.Get("search"), Receipt: q.Get("receipt"), Financial: q.Get("financial"), Claim: q.Get("claim"), UserClaim: q.Get("claim_status"), Status: q.Get("status"), SKU: q.Get("sku")}
 }
 func (s *Server) results(w http.ResponseWriter, r *http.Request) {
-	rs, e := s.DB.Results(r.Context(), filter(r))
+	f := filter(r)
+	if f.Marketplace == "" { fail(w, 400, "Unsupported marketplace"); return }
+	rs, e := s.DB.Results(r.Context(), f)
 	if e != nil {
 		slog.Error("results", "error", e)
 		fail(w, 500, "Could not load results")
@@ -356,12 +382,17 @@ func amount(n int64) string {
 	return fmt.Sprintf("%s%d.%02d", sign, n/100, n%100)
 }
 func (s *Server) export(w http.ResponseWriter, r *http.Request) {
-	rs, e := s.DB.Results(r.Context(), filter(r))
+	f := filter(r)
+	if f.Marketplace == "" { fail(w, 400, "Unsupported marketplace"); return }
+	rs, e := s.DB.Results(r.Context(), f)
 	if e != nil {
 		fail(w, 500, "Could not export results")
 		return
 	}
-	headers := []string{"Order ID", "SKU", "Website Month", "Return Status", "Physical Status", "Received Month", "Financial Status", "Payment Scenario", "Refund Date", "Refund Total (INR)", "Fee Refund (INR)", "Reimbursement (INR)", "Remaining Loss (INR)", "Claim Rule", "Claim Opens", "Claim Deadline", "System Claim Action", "Claim Raised", "User Claim Status", "Claim Raised Date", "Claim Updated Date", "Amazon Claim ID", "Requested Amount (INR)", "Approved Amount (INR)", "Rejection Reason", "Claim Notes", "User Notes", "Rule Version"}
+	recoveryHeader := "Product Reimbursement (INR)"
+	claimIDHeader := "Amazon Claim ID"
+	if f.Marketplace == "flipkart" { recoveryHeader = "SPF Reimbursement (INR)"; claimIDHeader = "Flipkart SPF Claim ID" }
+	headers := []string{"Order ID", "SKU", "Return Month", "Return Status", "Physical Status", "Received Month", "Financial Status", "Payment Scenario", "Refund Date", "Refund Total (INR)", "Fee Refund (INR)", recoveryHeader, "Remaining Loss (INR)", "Claim Rule", "Claim Opens", "Claim Deadline", "System Claim Action", "Claim Raised", "User Claim Status", "Claim Raised Date", "Claim Updated Date", claimIDHeader, "Requested Amount (INR)", "Approved Amount (INR)", "Rejection Reason", "Claim Notes", "User Notes", "Rule Version"}
 	data := [][]string{headers}
 	for _, v := range rs {
 		data = append(data, []string{safeCell(v.OrderID), safeCell(v.SKU), v.Month, safeCell(v.Status), v.Receipt, v.ReceivedMonth, v.Financial, v.Scenario, date(v.RefundDate), amount(v.RefundTotal), amount(v.FeeRefund), amount(v.Reimbursement), amount(v.Loss), v.ClaimRule, date(v.ClaimOpen), date(v.ClaimDeadline), v.ClaimStatus, strconv.FormatBool(v.ClaimRaised), v.UserClaimStatus, date(v.ClaimRaisedDate), date(v.ClaimUpdatedDate), safeCell(v.AmazonClaimID), amount(v.ClaimAmountRequested), amount(v.ClaimAmountApproved), safeCell(v.ClaimRejectionReason), safeCell(v.ClaimNotes), safeCell(v.UserNotes), v.RuleVersion})
@@ -406,7 +437,7 @@ func (s *Server) export(w http.ResponseWriter, r *http.Request) {
 			{"Scheduled", summary.Scheduled, "cases"},
 			{"Expired", summary.Expired, "cases"},
 			{"Refund Debited", amount(summary.RefundDebited), "INR"},
-			{"Product Reimbursement", amount(summary.Reimbursement), "INR"},
+			{strings.TrimSuffix(recoveryHeader, " (INR)"), amount(summary.Reimbursement), "INR"},
 			{"Fee Refund", amount(summary.FeeRefund), "INR"},
 			{"Recovered product amount", amount(summary.Recovered), "INR"},
 			{"Remaining Product Loss", amount(summary.Loss), "INR"},
@@ -472,14 +503,14 @@ func (s *Server) export(w http.ResponseWriter, r *http.Request) {
 		index, _ := f.GetSheetIndex("Summary")
 		f.SetActiveSheet(index)
 		w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-		w.Header().Set("Content-Disposition", `attachment; filename="amazon-returns.xlsx"`)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-returns.xlsx"`, f.Marketplace))
 		if e = f.Write(w); e != nil {
 			slog.Error("xlsx response", "error", e)
 		}
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="amazon-returns.csv"`)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-returns.csv"`, f.Marketplace))
 	c := csv.NewWriter(w)
 	c.WriteAll(data)
 }

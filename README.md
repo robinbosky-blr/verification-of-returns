@@ -1,6 +1,8 @@
 # ReturnScope — Robinbosky returns reconciliation
 
-Amazon-first web application with a Svelte 5 / SvelteKit 3 interface, Go API and worker, and PostgreSQL. Flipkart and Myntra are reserved in the marketplace selector. All parsing, matching, money calculations, claim dates and exports run in Go.
+Marketplace-separated returns application with a Svelte 5 / SvelteKit 3 interface, Go API and worker, and PostgreSQL. Amazon V1 is production-ready; Flipkart has an isolated `flipkart-spf-v1` parser/rule-engine foundation and must be validated against original Flipkart exports before its column registry is locked. All parsing, matching, money calculations, claim dates and exports run without AI.
+
+Amazon and Flipkart use separate browser records, database marketplace keys, PostgreSQL schema views, parsers, payment classifications and claim engines. Selecting one marketplace cannot load or calculate the other marketplace's rows.
 
 ## Run on Windows, macOS or Linux
 

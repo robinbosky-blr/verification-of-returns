@@ -50,7 +50,8 @@
     reconcileBrowser,
     saveBrowserClaim,
     setBrowserImportActive,
-    type BrowserState
+    type BrowserState,
+    type Marketplace
   } from '../lib/browser-store';
   import './style.css';
   type Page = 'Overview' | 'Data imports' | 'Reports' | 'Claims';
@@ -58,6 +59,7 @@
     signed = $state(false),
     checking = $state(true),
     browserMode = $state(false),
+    marketplace = $state<Marketplace>('amazon'),
     theme = $state<'light' | 'dark'>('light'),
     password = $state(''),
     loginError = $state('');
@@ -101,40 +103,21 @@
     'Not Debited',
     'Reimbursed'
   ];
-  const cards = [
-    {
-      kind: 'website',
-      title: 'Website return data',
-      desc: 'Amazon return reconciliation reports',
-      icon: Package,
-      color: 'blue'
-    },
-    {
-      kind: 'physical',
-      title: 'Physical received data',
-      desc: 'Your warehouse receipt records',
-      icon: PackageCheck,
-      color: 'blue'
-    },
-    {
-      kind: 'payment',
-      title: 'Payment data',
-      desc: 'Amazon transaction and settlement files',
-      icon: IndianRupee,
-      color: 'blue'
-    }
+  const amazonCards = [
+    { kind: 'website', title: 'Website return data', desc: 'Amazon return reconciliation reports', icon: Package, color: 'blue' },
+    { kind: 'physical', title: 'Physical received data', desc: 'Your warehouse receipt records', icon: PackageCheck, color: 'blue' },
+    { kind: 'payment', title: 'Payment data', desc: 'Amazon transaction and settlement files', icon: IndianRupee, color: 'blue' }
   ];
+  const flipkartCards = [
+    { kind: 'website', title: 'Flipkart return data', desc: 'Flipkart returns and status report', icon: Package, color: 'blue' },
+    { kind: 'physical', title: 'Physical received data', desc: 'Flipkart warehouse receipt records', icon: PackageCheck, color: 'blue' },
+    { kind: 'payment', title: 'Payment and SPF data', desc: 'Flipkart settlements, refunds and SPF recovery', icon: IndianRupee, color: 'blue' }
+  ];
+  let cards = $derived(marketplace === 'amazon' ? amazonCards : flipkartCards);
   function summarize(rows: Case[]): Summary {
     const s: Summary = { total: 0, received: 0, not_received: 0, debited: 0, not_debited: 0, unknown: 0, reimbursed: 0, partial: 0, raise: 0, scheduled: 0, expired: 0, refund_debited: 0, reimbursement: 0, fee_refund: 0, loss: 0, recovered: 0, no_loss_cases: 0, claim_pending: 0, claim_approved: 0, claim_rejected: 0, claim_partial_approved: 0 };
     for (const c of rows) {
       s.total++;
-      if (c.receipt === 'Received') { s.received++; continue; }
-      s.not_received++;
-      if (['Debited', 'Partially Reimbursed', 'Already Reimbursed'].includes(c.financial)) s.debited++;
-      else if (c.financial === 'Not Debited') s.not_debited++;
-      else s.unknown++;
-      if (c.financial === 'Already Reimbursed') s.reimbursed++;
-      if (c.financial === 'Partially Reimbursed') s.partial++;
       const manual = c.user_claim_status || 'Not Raised';
       if (manual === 'Not Raised') {
         if (c.claim_status === 'Raise Claim') s.raise++;
@@ -145,6 +128,13 @@
       if (manual === 'Approved') s.claim_approved++;
       if (manual === 'Rejected') s.claim_rejected++;
       if (manual === 'Partially Approved') s.claim_partial_approved++;
+      if (c.receipt === 'Received') { s.received++; continue; }
+      s.not_received++;
+      if (['Debited', 'Partially Reimbursed', 'Already Reimbursed'].includes(c.financial)) s.debited++;
+      else if (c.financial === 'Not Debited') s.not_debited++;
+      else s.unknown++;
+      if (c.financial === 'Already Reimbursed') s.reimbursed++;
+      if (c.financial === 'Partially Reimbursed') s.partial++;
       if (c.financial === 'Not Debited' || c.financial === 'Already Reimbursed') s.no_loss_cases++;
       if (c.refund_total < 0) s.refund_debited -= c.refund_total;
       s.reimbursement += c.reimbursement;
@@ -155,7 +145,7 @@
     return s;
   }
   function refreshBrowser() {
-    const allCases = reconcileBrowser(browserState);
+    const allCases = reconcileBrowser(browserState, marketplace);
     const periodRows = allCases.filter((c) => (!month || c.month === month) && (!year || c.month.startsWith(year)));
     const monthly: Record<string, Summary> = {};
     for (const m of [...new Set(allCases.map((c) => c.month))]) monthly[m] = summarize(allCases.filter((c) => c.month === m));
@@ -169,7 +159,7 @@
     if (financial) rows = rows.filter((c) => c.financial === financial);
     if (status) rows = rows.filter((c) => c.status === status);
     if (page === 'Claims') {
-      rows = rows.filter((c) => c.receipt === 'Not Received');
+      if (marketplace === 'amazon') rows = rows.filter((c) => c.receipt === 'Not Received');
       const q = claim || 'Raise Claim';
       rows = ['Pending', 'Approved', 'Rejected', 'Partially Approved'].includes(q)
         ? rows.filter((c) => c.user_claim_status === q)
@@ -177,7 +167,7 @@
     }
     results = { rows, total: rows.length, summary: summarize(rows), monthly, page: 1, limit: 25 };
     imports = browserState.imports;
-    meta = { months: Object.keys(monthly).sort().map((m) => ({ month: m, count: monthly[m].total })), jobs: [], rule_version: 'amazon-seller-v1' };
+    meta = { months: Object.keys(monthly).sort().map((m) => ({ month: m, count: monthly[m].total })), jobs: [], rule_version: marketplace === 'amazon' ? 'amazon-seller-v1' : 'flipkart-spf-v1' };
   }
   let summary = $derived(overview?.summary);
   let months = $derived(Object.keys(overview?.monthly ?? {}).sort());
@@ -186,6 +176,7 @@
   let filterMonths = $derived(Array.from({ length: 12 }, (_, index) => `${year || currentYear}-${String(index + 1).padStart(2, '0')}`));
   function params(report = true) {
     const p = new URLSearchParams({ page: String(pageNo), limit: '25' });
+    p.set('marketplace', marketplace);
     if (month) p.set('month', month);
     if (year) p.set('year', year);
     if (search && report) p.set('search', search);
@@ -196,13 +187,28 @@
       if (financial) p.set('financial', financial);
       if (status) p.set('status', status);
       if (page === 'Claims') {
-        p.set('receipt', 'Not Received');
+        if (marketplace === 'amazon') p.set('receipt', 'Not Received');
         const userStatuses = ['Pending', 'Approved', 'Rejected', 'Partially Approved'];
         if (userStatuses.includes(claim)) p.set('claim_status', claim);
         else p.set('claim', claim || 'Raise Claim');
       }
     }
     return p.toString();
+  }
+  async function switchMarketplace(next: Marketplace) {
+    if (next === marketplace) return;
+    marketplace = next;
+    localStorage.setItem('returnscope-marketplace', next);
+    month = ''; year = ''; search = ''; financial = ''; status = ''; claim = ''; tab = 'All returns'; pageNo = 1;
+    selected = null; dashboardPreview = null; notice = ''; error = '';
+    if (browserMode) {
+      busy = true;
+      try { browserState = await loadBrowserState(next); refreshBrowser(); }
+      catch (e) { error = (e as Error).message; }
+      finally { busy = false; }
+      return;
+    }
+    await load();
   }
   let loadSequence = 0;
   async function load() {
@@ -220,8 +226,8 @@
       const [r, o, i, m] = await Promise.all([
         api<Results>('/results?' + params()),
         api<Results>('/results?' + params(false)),
-        api<Import[]>('/imports'),
-        api<Meta>('/meta')
+        api<Import[]>('/imports?marketplace=' + marketplace),
+        api<Meta>('/meta?marketplace=' + marketplace)
       ]);
       if (sequence !== loadSequence) return;
       results = r;
@@ -280,7 +286,7 @@
     notice = '';
     try {
       if (browserMode) {
-        const imported = await importBrowserFile(browserState, kind, f, coverage);
+        const imported = await importBrowserFile(browserState, marketplace, kind, f, coverage);
         browserState = imported.state;
         notice = imported.duplicate
           ? 'This file has already been imported. No duplicate data was added.'
@@ -290,6 +296,7 @@
       }
       const data = new FormData();
       data.append('kind', kind);
+      data.append('marketplace', marketplace);
       data.append('file', f);
       if (coverage) data.append('month', coverage);
       const r = await api<{ duplicate: boolean; import: Import }>('/imports', {
@@ -309,13 +316,13 @@
   }
   async function activate(i: Import) {
     if (browserMode) {
-      browserState = await setBrowserImportActive(browserState, i.id, !i.active);
+      browserState = await setBrowserImportActive(browserState, i.id, !i.active, marketplace);
       notice = i.active ? 'Import excluded. Affected cases were recalculated.' : 'Import restored. Affected cases were recalculated.';
       refreshBrowser();
       return;
     }
     try {
-      await api('/imports/' + i.id + '/active', {
+      await api('/imports/' + i.id + '/active?marketplace=' + marketplace, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ active: !i.active })
@@ -333,12 +340,12 @@
     notice = '';
     try {
       if (browserMode) {
-        browserState = await deleteBrowserImport(browserState, i.id);
+        browserState = await deleteBrowserImport(browserState, i.id, marketplace);
         notice = `${i.filename} deleted. Its imported data was removed and totals were recalculated.`;
         refreshBrowser();
         return;
       }
-      await api('/imports/' + i.id, { method: 'DELETE' });
+      await api('/imports/' + i.id + '?marketplace=' + marketplace, { method: 'DELETE' });
       notice = `${i.filename} deleted. Affected totals are being recalculated.`;
       await load();
     } catch (e) {
@@ -349,7 +356,7 @@
   }
   async function detail(c: Case) {
     try {
-      const detailCase = browserMode ? c : await api<Case>('/case?key=' + encodeURIComponent(c.key));
+      const detailCase = browserMode ? c : await api<Case>('/case?marketplace=' + marketplace + '&key=' + encodeURIComponent(c.key));
       selected = detailCase;
       claimForm = {
         status: detailCase.user_claim_status || 'Not Raised',
@@ -416,14 +423,14 @@
           claim_notes: body.claim_notes,
           user_notes: body.user_notes
         };
-        browserState = await saveBrowserClaim(browserState, updated);
+        browserState = await saveBrowserClaim(browserState, updated, marketplace);
         selected = updated;
         refreshBrowser();
         notice = 'Claim status saved in this private browser workspace. New imports will not overwrite it.';
         return;
       }
-      await api('/case/claim', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      notice = 'Claim status saved permanently. New Amazon imports will not overwrite this manual action.';
+      await api('/case/claim?marketplace=' + marketplace, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      notice = `Claim status saved permanently. New ${marketplace === 'amazon' ? 'Amazon' : 'Flipkart'} imports will not overwrite this manual action.`;
       await detail(selected);
       await load();
     } catch (e) { error = (e as Error).message; }
@@ -435,7 +442,7 @@
         refreshBrowser();
         return;
       }
-      await api('/reconcile', { method: 'POST' });
+      await api('/reconcile?marketplace=' + marketplace, { method: 'POST' });
       notice = 'Reconciliation queued. Results will update after it completes.';
       await load();
     } catch (e) {
@@ -460,13 +467,13 @@
       'Received Month': c.received_month,
       'Financial Status': c.financial,
       Refund: c.refund_total / 100,
-      'Fulfilment Fee Refund': c.fee_refund / 100,
-      Reimbursement: c.reimbursement / 100,
+      [marketplace === 'amazon' ? 'Fulfilment Fee Refund' : 'Flipkart Fee Refund']: c.fee_refund / 100,
+      [marketplace === 'amazon' ? 'Reimbursement' : 'SPF Reimbursement']: c.reimbursement / 100,
       'Current Product Loss': c.loss / 100,
       'System Claim Action': c.claim_status,
       'User Claim Status': c.user_claim_status,
       'Claim Updated Date': c.claim_updated_date,
-      'Amazon Claim ID': c.amazon_claim_id,
+      [marketplace === 'amazon' ? 'Amazon Claim ID' : 'Flipkart SPF Claim ID']: c.amazon_claim_id,
       'Requested Amount': c.claim_amount_requested / 100,
       'Approved Amount': c.claim_amount_approved / 100,
       'Rejection Reason': c.claim_rejection_reason,
@@ -479,12 +486,12 @@
       const blob = new Blob([XLSX.utils.sheet_to_csv(sheet)], { type: 'text/csv;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
-      link.href = url; link.download = `returnscope-${stamp}.csv`; link.click(); URL.revokeObjectURL(url);
+      link.href = url; link.download = `returnscope-${marketplace}-${stamp}.csv`; link.click(); URL.revokeObjectURL(url);
       return;
     }
     const book = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(book, sheet, 'Return cases');
-    XLSX.writeFile(book, `returnscope-${stamp}.xlsx`);
+    XLSX.writeFile(book, `returnscope-${marketplace}-${stamp}.xlsx`);
   }
   function tone(s: string) {
     if (['Received', 'Already Reimbursed', 'Not Debited', 'completed', 'No Claim', 'Approved'].includes(s))
@@ -501,11 +508,12 @@
   onMount(() => {
     let alive = true;
     theme = localStorage.getItem('returnscope-theme') === 'dark' ? 'dark' : 'light';
+    marketplace = localStorage.getItem('returnscope-marketplace') === 'flipkart' ? 'flipkart' : 'amazon';
     if (location.hostname === 'terminal.local' || location.hostname.endsWith('.chatgpt.site')) {
       browserMode = true;
       signed = true;
       checking = false;
-      void loadBrowserState()
+      void loadBrowserState(marketplace)
         .then((saved) => { browserState = saved; refreshBrowser(); })
         .catch((e) => { error = (e as Error).message; });
       return;
@@ -532,7 +540,7 @@
 <svelte:head
   ><title>ReturnScope · Returns reconciliation</title><meta
     name="description"
-    content="Amazon returns, payments and claims in one clear workspace."
+    content="Marketplace returns, payments and claims in one clear workspace."
   /></svelte:head
 >
 {#if checking}<div class="loading-screen">
@@ -554,7 +562,7 @@
           missing, and what needs a claim.
         </p>
         <div class="login-proof">
-          <ShieldCheck size={22} />Amazon first. Every calculation accounted for.
+          <ShieldCheck size={22} />Marketplace-specific rules. Every calculation accounted for.
         </div>
       </div>
       <small>Returns intelligence for your business</small>
@@ -616,7 +624,7 @@
       <div class="sidebar-bottom">
         <div class="engine-note">
           <span class="live-dot"></span>{browserMode ? ' Browser processing active' : ' Backend processing active'}<small
-            >Amazon returns workspace</small
+            >{marketplace === 'amazon' ? 'Amazon' : 'Flipkart'} returns workspace</small
           >
         </div>
         <button class="profile" onclick={() => void logout()}
@@ -643,7 +651,7 @@
       <main class="content">
         <div class="page-heading">
           <div>
-            <div class="eyebrow">AMAZON RETURNS INTELLIGENCE</div>
+            <div class="eyebrow">{marketplace.toUpperCase()} RETURNS INTELLIGENCE</div>
             <h1>
               {page === 'Overview'
                 ? 'Every return. A clearer picture.'
@@ -659,7 +667,9 @@
                 : page === 'Data imports'
                   ? 'Upload your three source files. We’ll take care of the reconciliation.'
                   : page === 'Claims'
-                    ? 'Review missing returns with an outstanding refund debit.'
+                    ? marketplace === 'amazon'
+                      ? 'Review missing returns with an outstanding refund debit.'
+                      : 'Review Product Missing, DNE and SPF claim windows.'
                     : 'One source of truth for receipts, debits, and reimbursements.'}
             </p>
           </div>
@@ -673,10 +683,12 @@
         </div>
         <div class="filterbar">
           <div class="marketplace">
-            <span class="amazon-a">a<span>⌣</span></span><select aria-label="Marketplace"
-              ><option>Amazon</option><option disabled>Flipkart · Coming soon</option><option
-                disabled>Myntra · Coming soon</option
-              ></select
+            {#if marketplace === 'amazon'}<span class="amazon-a">a<span>⌣</span></span
+            >{:else}<span class="flipkart-f">F</span>{/if}<select
+              aria-label="Marketplace"
+              value={marketplace}
+              onchange={(event) => void switchMarketplace((event.currentTarget as HTMLSelectElement).value as Marketplace)}
+              ><option value="amazon">Amazon</option><option value="flipkart">Flipkart</option><option value="myntra" disabled>Myntra · Coming soon</option></select
             ><span class="pill success subtle">ACTIVE</span>
           </div>
           <div class="filter-divider"></div>
@@ -710,7 +722,7 @@
           >
         </div>
         {#if browserMode}<div class="alert notice">
-            <ShieldCheck size={17} />Your files are processed privately in this browser and saved only on this device. No sample records are included.
+            <ShieldCheck size={17} />Your {marketplace === 'amazon' ? 'Amazon' : 'Flipkart'} files are processed in a separate private workspace on this device. No sample records are included and marketplace data is never mixed.
           </div>{/if}
         {#if error}<div class="alert error">
             <AlertCircle size={17} />{error}<button
@@ -778,7 +790,7 @@
                 </div>{:else}<div class="empty-chart">
                   <Layers size={29} />
                   <h3>Your returns story starts here</h3>
-                  <p>Import your Amazon files to see your monthly picture.</p>
+                  <p>Import your {marketplace === 'amazon' ? 'Amazon' : 'Flipkart'} files to see your monthly picture.</p>
                   <button class="text-button" onclick={() => navigate('Data imports')}
                     >Upload your first files <ArrowRight size={15} /></button
                   >
@@ -796,11 +808,11 @@
               <h2>Exact financial position.</h2>
               <div class="finance-card-grid">
                 <button onclick={() => void openDashboardPreview('Debited')}><span>Total refund</span><strong>{money(summary?.refund_debited)}</strong><small>Buyer refund debited</small></button>
-                <button onclick={() => void openDashboardPreview('Debited')}><span>Recovered</span><strong class="recovered">{money(summary?.recovered)}</strong><small>Product reimbursement received</small></button>
+                <button onclick={() => void openDashboardPreview('Debited')}><span>Recovered</span><strong class="recovered">{money(summary?.recovered)}</strong><small>{marketplace === 'amazon' ? 'Product reimbursement received' : 'SPF reimbursement received'}</small></button>
                 <button onclick={() => void openDashboardPreview('Debited')}><span>Current product loss</span><strong class="loss-text">{money(summary?.loss)}</strong><small>Still unrecovered</small></button>
                 <button onclick={() => void openDashboardPreview('Not Debited')}><span>No-loss cases</span><strong>{number(summary?.no_loss_cases)}</strong><small>Not debited or fully reimbursed</small></button>
               </div>
-              <div class="finance-rows"><div><span>Fulfilment fee refunds</span><b>{money(summary?.fee_refund)}</b></div></div>
+              <div class="finance-rows"><div><span>{marketplace === 'amazon' ? 'Fulfilment fee refunds' : 'Flipkart fee refunds'}</span><b>{money(summary?.fee_refund)}</b></div></div>
             </section>
           </div>
           <section class="panel financial-trend">
@@ -1080,7 +1092,7 @@
                           <p>
                             {imports.length
                               ? 'Change the period or status to find your cases.'
-                              : 'Upload your Amazon data to start reconciling.'}
+                              : `Upload your ${marketplace === 'amazon' ? 'Amazon' : 'Flipkart'} data to start reconciling.`}
                           </p>
                           {#if !imports.length}<button
                               class="primary"
@@ -1170,7 +1182,7 @@
             ><span class="pill {tone(selected.claim_status)}">System: {selected.claim_status}</span><span class="pill {tone(selected.user_claim_status || 'Not Raised')}">Claim: {selected.user_claim_status || 'Not Raised'}</span>
           </div>
           <dl>
-            {#each [['Website month', monthLabel(selected.month)], ['Latest return status', selected.status], ['Last updated', date(selected.updated)], ['Delivered date', date(selected.delivered)], ['Refund date', date(selected.refund_date)], ['Order total', money(selected.order_total)], ['Refund total', money(selected.refund_total)], ['Fee refund', money(selected.fee_refund)], ['Reimbursement', money(selected.reimbursement)], ['Remaining product loss', money(selected.loss)], ['Claim rule', selected.claim_rule || '—'], ['Claim opens', date(selected.claim_open)], ['Claim deadline', date(selected.claim_deadline)], ['Claim raised date', date(selected.claim_raised_date)], ['Claim updated', date(selected.claim_updated_date)], ['Amazon Claim ID', selected.amazon_claim_id || '—'], ['Requested amount', money(selected.claim_amount_requested)], ['Approved amount', money(selected.claim_amount_approved)], ['Rule version', selected.rule_version]] as pair}<div
+            {#each [['Return month', monthLabel(selected.month)], ['Latest return status', selected.status], ['Last updated', date(selected.updated)], ['Delivered / received date', date(selected.delivered)], ['Refund date', date(selected.refund_date)], ['Order total', money(selected.order_total)], ['Refund total', money(selected.refund_total)], ['Fee refund', money(selected.fee_refund)], [marketplace === 'amazon' ? 'Reimbursement' : 'SPF reimbursement', money(selected.reimbursement)], ['Remaining product loss', money(selected.loss)], ['Claim rule', selected.claim_rule || '—'], ['Claim opens', date(selected.claim_open)], ['Claim deadline', date(selected.claim_deadline)], ['Claim raised date', date(selected.claim_raised_date)], ['Claim updated', date(selected.claim_updated_date)], [marketplace === 'amazon' ? 'Amazon Claim ID' : 'Flipkart SPF Claim ID', selected.amazon_claim_id || '—'], ['Requested amount', money(selected.claim_amount_requested)], ['Approved amount', money(selected.claim_amount_approved)], ['Rule version', selected.rule_version]] as pair}<div
               >
                 <dt>{pair[0]}</dt>
                 <dd>{pair[1]}</dd>
@@ -1178,11 +1190,11 @@
           </dl>
           {#each selected.notes as n}<div class="alert notice">{n}</div>{/each}
           <section class="claim-editor">
-            <div class="panel-heading"><div><h3>Manual claim tracking</h3><p>Permanent user action. New Amazon imports cannot overwrite it.</p></div><span class="pill {tone(claimForm.status)}">{claimForm.status}</span></div>
+            <div class="panel-heading"><div><h3>Manual claim tracking</h3><p>Permanent user action. New {marketplace === 'amazon' ? 'Amazon' : 'Flipkart'} imports cannot overwrite it.</p></div><span class="pill {tone(claimForm.status)}">{claimForm.status}</span></div>
             <div class="claim-form-grid">
               <label>Claim status<select bind:value={claimForm.status}>{#each ['Not Raised','Pending','Approved','Rejected','Partially Approved'] as cs}<option>{cs}</option>{/each}</select></label>
               <label>Claim raised date<input type="date" bind:value={claimForm.raisedDate} disabled={claimForm.status === 'Not Raised'} /></label>
-              <label>Amazon Claim ID<input bind:value={claimForm.amazonClaimID} placeholder="Optional claim ID" /></label>
+              <label>{marketplace === 'amazon' ? 'Amazon Claim ID' : 'Flipkart SPF Claim ID'}<input bind:value={claimForm.amazonClaimID} placeholder="Optional claim ID" /></label>
               <label>Requested amount (₹)<input type="number" min="0" step="0.01" bind:value={claimForm.requested} /></label>
               <label>Approved amount (₹)<input type="number" min="0" step="0.01" bind:value={claimForm.approved} /></label>
               <label>Rejection reason<input bind:value={claimForm.rejectionReason} placeholder="Only if rejected" /></label>

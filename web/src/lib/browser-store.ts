@@ -2,6 +2,8 @@ import * as XLSX from 'xlsx';
 import { unzipSync } from 'fflate';
 import type { Case, Import } from './api';
 
+export type Marketplace = 'amazon' | 'flipkart';
+
 export type BrowserAudit = { id: number; action: string; details: unknown; created_at: string };
 
 export type SourceRow = {
@@ -13,6 +15,7 @@ export type SourceRow = {
   updated: string;
   delivered: string;
   status: string;
+  reason: string;
   type: string;
   channel: string;
   reference_id: string;
@@ -48,7 +51,7 @@ export type BrowserState = {
 const DB_NAME = 'returnscope-amazon-v1';
 const DB_VERSION = 2;
 const STORE = 'workspace';
-const KEY = 'primary';
+const LEGACY_KEY = 'primary';
 const MAX_FILE_SIZE = 100 * 1024 * 1024;
 
 const emptyState = (): BrowserState => ({ version: 1, rows: [], imports: [], claims: {}, audit: [] });
@@ -65,23 +68,30 @@ function openDB(): Promise<IDBDatabase> {
   });
 }
 
-export async function loadBrowserState(): Promise<BrowserState> {
+export async function loadBrowserState(marketplace: Marketplace = 'amazon'): Promise<BrowserState> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readonly');
-    const request = tx.objectStore(STORE).get(KEY);
-    request.onsuccess = () => resolve((request.result as BrowserState | undefined) ?? emptyState());
+    const store = tx.objectStore(STORE);
+    const request = store.get(marketplace);
+    request.onsuccess = () => {
+      if (request.result) { resolve(request.result as BrowserState); return; }
+      if (marketplace !== 'amazon') { resolve(emptyState()); return; }
+      const legacy = store.get(LEGACY_KEY);
+      legacy.onsuccess = () => resolve((legacy.result as BrowserState | undefined) ?? emptyState());
+      legacy.onerror = () => reject(legacy.error ?? new Error('Could not read the Amazon browser workspace.'));
+    };
     request.onerror = () => reject(request.error ?? new Error('Could not read the browser workspace.'));
     tx.oncomplete = () => db.close();
   });
 }
 
-export async function saveBrowserState(state: BrowserState): Promise<void> {
+export async function saveBrowserState(state: BrowserState, marketplace: Marketplace = 'amazon'): Promise<void> {
   const db = await openDB();
   const persisted = JSON.parse(JSON.stringify(state)) as BrowserState;
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put(persisted, KEY);
+    tx.objectStore(STORE).put(persisted, marketplace);
     tx.oncomplete = () => { db.close(); resolve(); };
     tx.onerror = () => { db.close(); reject(tx.error ?? new Error('Could not save the browser workspace.')); };
   });
@@ -103,10 +113,11 @@ const aliases: Record<string, string[]> = {
   amount: ['total', 'totalinr', 'totalamount', 'amount', 'transactionamount', 'transactiontotal', 'netamount', 'netproceeds', 'nettotal'],
   quantity: ['quantity', 'qty', 'returnquantity'],
   channel: ['fulfilment', 'fulfillment', 'fulfilmentchannel', 'fulfillmentchannel', 'returntype'],
+  reason: ['returnreason', 'reason', 'subreason', 'customerreturnreason', 'returnsubreason'],
   reference: ['transactionid', 'amazontransactionid', 'referenceid', 'transactionreference', 'transactionreferenceid', 'settlementid', 'settlementidentifier']
 };
 
-const sourceAliases: Record<SourceRow['kind'], Partial<Record<string, string[]>>> = {
+const amazonSourceAliases: Record<SourceRow['kind'], Partial<Record<string, string[]>>> = {
   website: {
     order: ['customerorderid', 'amazonorderid', 'orderid', 'merchantorderid', 'orderno', 'ordernumber'],
     // Amazon website exports contain both listing SKU and merchant mSKU. Reconciliation uses mSKU.
@@ -125,9 +136,36 @@ const sourceAliases: Record<SourceRow['kind'], Partial<Record<string, string[]>>
   }
 };
 
-function columns(row: unknown[], kind: SourceRow['kind']): Record<string, number> {
+const flipkartSourceAliases: Record<SourceRow['kind'], Partial<Record<string, string[]>>> = {
+  website: {
+    order: ['orderid', 'orderitemid', 'orderunitid', 'shipmentid', 'returnid'],
+    sku: ['sku', 'sellersku', 'merchantsku', 'fsn'],
+    date: ['returncreationdate', 'returnrequesteddate', 'returnrequestdate', 'returndate', 'createddate'],
+    updated: ['lastupdateddate', 'lastupdatedon', 'statusupdateddate', 'updateddate', 'returncreationdate'],
+    delivered: ['returndelivereddate', 'delivereddatetoseller', 'receiveddate'],
+    status: ['returnstatus', 'status', 'shipmentstatus'],
+    channel: ['returntype', 'deliverytype', 'fulfilmenttype'],
+    reason: ['returnreason', 'reason', 'subreason', 'customerreturnreason']
+  },
+  physical: {
+    order: ['orderid', 'orderitemid', 'orderunitid', 'shipmentid', 'returnid'],
+    sku: ['sku', 'sellersku', 'fsn'],
+    date: ['receiveddate', 'physicalreceiveddate', 'returndate', 'date']
+  },
+  payment: {
+    order: ['orderid', 'orderitemid', 'orderunitid', 'shipmentid'],
+    sku: ['sku', 'sellersku', 'fsn'],
+    date: ['paymentdate', 'transactiondate', 'settlementdate', 'date'],
+    type: ['transactiontype', 'paymenttype', 'type', 'description'],
+    amount: ['amount', 'totalamount', 'netamount', 'settlementvalue', 'total'],
+    reference: ['transactionid', 'referenceid', 'settlementid', 'claimid']
+  }
+};
+
+function columns(row: unknown[], kind: SourceRow['kind'], marketplace: Marketplace): Record<string, number> {
   const result: Record<string, number> = {};
   const normalized = row.map(header);
+  const sourceAliases = marketplace === 'flipkart' ? flipkartSourceAliases : amazonSourceAliases;
   for (const field of Object.keys(aliases)) {
     for (const candidate of sourceAliases[kind][field] ?? aliases[field]) {
       const index = normalized.indexOf(candidate);
@@ -201,14 +239,14 @@ function money(value: unknown): number {
   return Math.round(amount * 100);
 }
 
-function parseSheet(data: unknown[][], name: string, kind: SourceRow['kind'], coverage: string, importId: string, importedAt: string): SourceRow[] {
+function parseSheet(data: unknown[][], name: string, marketplace: Marketplace, kind: SourceRow['kind'], coverage: string, importId: string, importedAt: string): SourceRow[] {
   let cols: Record<string, number> | null = null;
   let previousOrder = '';
   const output: SourceRow[] = [];
   for (let index = 0; index < data.length; index++) {
     const cells = data[index] ?? [];
     if (!cells.some((v) => clean(v))) { previousOrder = ''; continue; }
-    const possible = columns(cells, kind);
+    const possible = columns(cells, kind, marketplace);
     if (validColumns(possible, kind)) { cols = possible; previousOrder = ''; continue; }
     if (!cols) {
       if (index >= 49) throw new Error(`${name}: required ${kind} headers were not found in the first 50 rows.`);
@@ -256,6 +294,7 @@ function parseSheet(data: unknown[][], name: string, kind: SourceRow['kind'], co
       updated,
       delivered,
       status: clean(get('status')),
+      reason: clean(get('reason')),
       type: clean(get('type')),
       channel: clean(get('channel')),
       reference_id: normalize(get('reference')),
@@ -274,18 +313,18 @@ function parseSheet(data: unknown[][], name: string, kind: SourceRow['kind'], co
   return output;
 }
 
-function workbookRows(bytes: Uint8Array, filename: string, kind: SourceRow['kind'], coverage: string, importId: string, importedAt: string): SourceRow[] {
+function workbookRows(bytes: Uint8Array, filename: string, marketplace: Marketplace, kind: SourceRow['kind'], coverage: string, importId: string, importedAt: string): SourceRow[] {
   const workbook = XLSX.read(bytes, { type: 'array', cellDates: false, raw: true });
   const rows: SourceRow[] = [];
   for (const sheetName of workbook.SheetNames) {
     const data = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[sheetName], { header: 1, raw: true, defval: '' });
     if (!data.some((row) => row.some((value) => clean(value)))) continue;
-    rows.push(...parseSheet(data, filename.toLowerCase().endsWith('.csv') ? 'CSV' : sheetName, kind, coverage, importId, importedAt));
+    rows.push(...parseSheet(data, filename.toLowerCase().endsWith('.csv') ? 'CSV' : sheetName, marketplace, kind, coverage, importId, importedAt));
   }
   return rows;
 }
 
-export function parseBrowserUploadBytes(kind: string, filename: string, bytes: Uint8Array, coverage = '', importId = 'test-import', importedAt = new Date().toISOString()): SourceRow[] {
+export function parseBrowserUploadBytes(kind: string, filename: string, bytes: Uint8Array, coverage = '', importId = 'test-import', importedAt = new Date().toISOString(), marketplace: Marketplace = 'amazon'): SourceRow[] {
   if (!['website', 'physical', 'payment'].includes(kind)) throw new Error('Unknown import type.');
   const ext = filename.toLowerCase().match(/\.[^.]+$/)?.[0] ?? '';
   if (!['.csv', '.xlsx', '.zip'].includes(ext)) throw new Error('Unsupported file. Upload CSV, XLSX, or ZIP only.');
@@ -298,10 +337,10 @@ export function parseBrowserUploadBytes(kind: string, filename: string, bytes: U
       if (name.endsWith('/') || name.startsWith('__MACOSX/') || name.endsWith('/.DS_Store')) continue;
       const entryExt = name.toLowerCase().match(/\.[^.]+$/)?.[0] ?? '';
       if (!['.csv', '.xlsx'].includes(entryExt)) throw new Error(`ZIP contains unsupported file ${JSON.stringify(name)}. Only CSV and XLSX are allowed.`);
-      parsed.push(...workbookRows(content, name, kind as SourceRow['kind'], coverage, importId, importedAt));
+      parsed.push(...workbookRows(content, name, marketplace, kind as SourceRow['kind'], coverage, importId, importedAt));
     }
   } else {
-    parsed = workbookRows(bytes, filename, kind as SourceRow['kind'], coverage, importId, importedAt);
+    parsed = workbookRows(bytes, filename, marketplace, kind as SourceRow['kind'], coverage, importId, importedAt);
   }
   if (!parsed.length) throw new Error('No data rows were found in the selected file.');
   return prepareRows(parsed);
@@ -354,7 +393,7 @@ function activeRows(state: BrowserState) {
   return [...selected.values()];
 }
 
-export async function importBrowserFile(state: BrowserState, kind: string, file: File, coverage: string): Promise<{ state: BrowserState; duplicate: boolean; imported: Import }> {
+export async function importBrowserFile(state: BrowserState, marketplace: Marketplace, kind: string, file: File, coverage: string): Promise<{ state: BrowserState; duplicate: boolean; imported: Import }> {
   if (!['website', 'physical', 'payment'].includes(kind)) throw new Error('Unknown import type.');
   const ext = file.name.toLowerCase().match(/\.[^.]+$/)?.[0] ?? '';
   if (!['.csv', '.xlsx', '.zip'].includes(ext)) throw new Error('Unsupported file. Upload CSV, XLSX, or ZIP only.');
@@ -367,7 +406,7 @@ export async function importBrowserFile(state: BrowserState, kind: string, file:
   if (duplicate) return { state, duplicate: true, imported: duplicate };
   const importedAt = new Date().toISOString();
   const importId = globalThis.crypto?.randomUUID?.() ?? `import-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const parsed = parseBrowserUploadBytes(kind, file.name, bytes, coverage, importId, importedAt);
+  const parsed = parseBrowserUploadBytes(kind, file.name, bytes, coverage, importId, importedAt, marketplace);
   const imported: Import = { id: importId, kind, filename: file.name, sha256, coverage_month: coverage, status: 'completed', active: true, rows: parsed.length, error: '', created_at: importedAt };
   const next: BrowserState = {
     ...state,
@@ -376,7 +415,7 @@ export async function importBrowserFile(state: BrowserState, kind: string, file:
     imports: [imported, ...state.imports],
     audit: [{ id: Date.now(), action: 'import.completed', details: { kind, filename: file.name, rows: parsed.length }, created_at: importedAt }, ...state.audit]
   };
-  try { await saveBrowserState(next); }
+  try { await saveBrowserState(next, marketplace); }
   catch (error) { throw new Error(`The file was parsed, but the browser could not save it: ${(error as Error).message}`); }
   return { state: next, duplicate: false, imported };
 }
@@ -400,7 +439,7 @@ function nextMonth(value: string) {
 
 const evidence = (row: SourceRow) => ({ kind: row.kind, order_id: row.order_id, sku: row.sku, date: row.date, type: row.type, amount: row.amount, source: row.source, line: row.line, status: row.status });
 
-export function reconcileBrowser(state: BrowserState): Case[] {
+function reconcileAmazonBrowser(state: BrowserState): Case[] {
   const rows = activeRows(state);
   const website = new Map<string, SourceRow[]>(), physical = new Map<string, SourceRow[]>(), payments = new Map<string, SourceRow[]>(), orderSkus = new Map<string, Set<string>>(), blankPayments = new Map<string, SourceRow[]>();
   for (const row of rows) {
@@ -484,7 +523,87 @@ export function reconcileBrowser(state: BrowserState): Case[] {
   return output.sort((a, b) => a.month.localeCompare(b.month) || a.key.localeCompare(b.key));
 }
 
-export async function saveBrowserClaim(state: BrowserState, item: Case): Promise<BrowserState> {
+function claimWindow(result: Case, open: string, deadline: string, rule: string, now: Date) {
+  result.claim_rule = rule;
+  result.claim_open = open;
+  result.claim_deadline = deadline;
+  const today = now.toISOString().slice(0, 10);
+  result.claim_status = today < open.slice(0, 10) ? 'Scheduled' : today > deadline.slice(0, 10) ? 'Expired' : 'Raise Claim';
+}
+
+function reconcileFlipkartBrowser(state: BrowserState): Case[] {
+  const rows = activeRows(state);
+  const website = new Map<string, SourceRow[]>(), physical = new Map<string, SourceRow[]>(), payments = new Map<string, SourceRow[]>();
+  for (const row of rows) {
+    const key = keyOf(row.order_id, row.sku);
+    const target = row.kind === 'website' ? website : row.kind === 'physical' ? physical : payments;
+    target.set(key, [...(target.get(key) ?? []), row]);
+  }
+  const output: Case[] = [], now = new Date();
+  for (const [key, events] of website) {
+    const ordered = [...events].sort((a, b) => a.updated.localeCompare(b.updated) || a.imported_at.localeCompare(b.imported_at));
+    const latest = ordered[ordered.length - 1];
+    const first = [...ordered].sort((a, b) => a.date.localeCompare(b.date))[0].date;
+    const receivedRows = [...(physical.get(key) ?? [])].sort((a, b) => a.date.localeCompare(b.date));
+    const received = receivedRows.length > 0;
+    const result: Case = {
+      key, order_id: latest.order_id, sku: latest.sku, month: monthOf(first), status: latest.status,
+      receipt: received ? 'Received' : 'Not Received', received_month: received ? monthOf(receivedRows[0].date) : '',
+      financial: 'Payment Data Missing', scenario: '', order_total: 0, refund_total: 0, fee_refund: 0,
+      reimbursement: 0, net: 0, loss: 0, recovered: 0, refund_date: '', updated: latest.updated,
+      delivered: received ? receivedRows[0].date : latest.delivered, claim_rule: '', claim_open: '', claim_deadline: '',
+      claim_status: 'Review', claim_raised: false, claim_raised_date: '', user_claim_status: 'Not Raised',
+      claim_updated_date: '', amazon_claim_id: '', claim_amount_requested: 0, claim_amount_approved: 0,
+      claim_rejection_reason: '', claim_notes: '', user_notes: '', rule_version: 'flipkart-spf-v1', notes: [],
+      evidence: [...ordered, ...receivedRows].map(evidence)
+    };
+    const manual = state.claims[key];
+    if (manual) Object.assign(result, manual);
+    const tx = payments.get(key) ?? [];
+    let hasRefund = false, unsupported = false;
+    for (const payment of tx) {
+      result.evidence!.push(evidence(payment));
+      result.net += payment.amount;
+      const type = normalize(payment.type);
+      if (['ORDER', 'SALE', 'SALE OF PRODUCT', 'PRODUCT SALE'].includes(type)) result.order_total += payment.amount;
+      else if (['REFUND', 'RETURN', 'CUSTOMER REFUND', 'REFUND FOR RETURN', 'RETURN REFUND'].includes(type)) {
+        hasRefund = true; result.refund_total -= Math.abs(payment.amount);
+        if (!result.refund_date || payment.date < result.refund_date) result.refund_date = payment.date;
+      } else if (type.includes('SPF') || type.includes('SELLER PROTECTION FUND') || type.includes('REIMBURSEMENT')) {
+        result.reimbursement += Math.abs(payment.amount);
+      } else if (type.includes('FEE REFUND') || type.includes('COMMISSION REFUND')) result.fee_refund += Math.abs(payment.amount);
+      else { unsupported = true; result.notes.push(`Unclassified Flipkart payment type: ${payment.type}`); }
+    }
+    result.scenario = hasRefund ? (result.order_total ? 'Sale + Refund' : 'Refund Only') : 'Sale Only';
+    if (result.reimbursement) result.scenario += ' + SPF Recovery';
+    if (!tx.length) result.financial = received ? 'Not Investigated — Received' : 'Payment Data Missing';
+    else if (!hasRefund) result.financial = 'Not Debited';
+    else {
+      const gross = Math.abs(result.refund_total);
+      result.recovered = Math.min(gross, Math.max(0, result.reimbursement));
+      result.loss = gross - result.recovered;
+      result.financial = result.loss === 0 ? 'Already Reimbursed' : result.recovered > 0 ? 'Partially Reimbursed' : 'Debited';
+    }
+    const classification = normalize(`${latest.status} ${latest.reason} ${latest.channel}`);
+    if (received && ['DAMAGED', 'DEFECTIVE', 'WRONG ITEM'].some((value) => classification.includes(value))) {
+      claimWindow(result, receivedRows[0].date, addDays(receivedRows[0].date, 14), 'SPF received condition claim · within 14 days', now);
+    } else if (received && classification.includes('IN TRANSIT')) {
+      claimWindow(result, addDays(receivedRows[0].date, 1), addDays(first, 120), 'In transit but physically received · wait 24 hours', now);
+    } else if (!received && (hasRefund || classification.includes('DO NOT EXPECT') || classification.includes('DNE'))) {
+      claimWindow(result, addDays(first, 60), addDays(first, 120), classification.includes('DO NOT EXPECT') || classification.includes('DNE') ? 'DNE physical delivery · day 60 to day 120' : 'Product Missing · day 60 to day 120', now);
+    } else if (result.financial === 'Already Reimbursed' || result.financial === 'Not Debited' || received) result.claim_status = 'No Claim';
+    else result.claim_status = 'Review';
+    if (unsupported) { result.financial = 'Payment Review'; result.claim_status = 'Review'; result.notes.push('Flipkart payment allocation requires review.'); }
+    output.push(result);
+  }
+  return output.sort((a, b) => a.month.localeCompare(b.month) || a.key.localeCompare(b.key));
+}
+
+export function reconcileBrowser(state: BrowserState, marketplace: Marketplace = 'amazon'): Case[] {
+  return marketplace === 'flipkart' ? reconcileFlipkartBrowser(state) : reconcileAmazonBrowser(state);
+}
+
+export async function saveBrowserClaim(state: BrowserState, item: Case, marketplace: Marketplace = 'amazon'): Promise<BrowserState> {
   const previous = state.claims[item.key] ?? null;
   const claim: ClaimData = {
     claim_raised: item.claim_raised, claim_raised_date: item.claim_raised_date, user_claim_status: item.user_claim_status,
@@ -493,12 +612,12 @@ export async function saveBrowserClaim(state: BrowserState, item: Case): Promise
     claim_rejection_reason: item.claim_rejection_reason, claim_notes: item.claim_notes, user_notes: item.user_notes
   };
   const next = { ...state, claims: { ...state.claims, [item.key]: claim }, audit: [{ id: Date.now(), action: 'claim.updated', details: { case_key: item.key, previous, current: claim }, created_at: item.claim_updated_date }, ...state.audit] };
-  await saveBrowserState(next); return next;
+  await saveBrowserState(next, marketplace); return next;
 }
 
-export async function setBrowserImportActive(state: BrowserState, id: string, active: boolean): Promise<BrowserState> {
+export async function setBrowserImportActive(state: BrowserState, id: string, active: boolean, marketplace: Marketplace = 'amazon'): Promise<BrowserState> {
   const next = { ...state, imports: state.imports.map((item) => item.id === id ? { ...item, active } : item), audit: [{ id: Date.now(), action: active ? 'import.restored' : 'import.excluded', details: { import_id: id }, created_at: new Date().toISOString() }, ...state.audit] };
-  await saveBrowserState(next); return next;
+  await saveBrowserState(next, marketplace); return next;
 }
 
 export function withoutBrowserImport(state: BrowserState, id: string): BrowserState {
@@ -514,8 +633,8 @@ export function withoutBrowserImport(state: BrowserState, id: string): BrowserSt
   };
 }
 
-export async function deleteBrowserImport(state: BrowserState, id: string): Promise<BrowserState> {
+export async function deleteBrowserImport(state: BrowserState, id: string, marketplace: Marketplace = 'amazon'): Promise<BrowserState> {
   const next = withoutBrowserImport(state, id);
-  await saveBrowserState(next);
+  await saveBrowserState(next, marketplace);
   return next;
 }

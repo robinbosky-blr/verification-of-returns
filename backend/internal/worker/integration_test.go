@@ -85,7 +85,7 @@ func TestImportLifecycle(t *testing.T) {
 	if e != nil || !dup || old.ID != web.ID {
 		t.Fatal(old, dup, e)
 	}
-	if e = db.SetActive(ctx, physical.ID, false); e != nil {
+	if e = db.SetActive(ctx, "amazon", physical.ID, false); e != nil {
 		t.Fatal(e)
 	}
 	if e = w.Once(ctx); e != nil {
@@ -94,7 +94,7 @@ func TestImportLifecycle(t *testing.T) {
 	if s = result(); s.Received != 0 || s.NotReceived != 2 {
 		t.Fatal(s)
 	}
-	if e = db.SetActive(ctx, physical.ID, true); e != nil {
+	if e = db.SetActive(ctx, "amazon", physical.ID, true); e != nil {
 		t.Fatal(e)
 	}
 	if e = w.Once(ctx); e != nil {
