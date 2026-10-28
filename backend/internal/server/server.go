@@ -384,6 +384,7 @@ func amount(n int64) string {
 func (s *Server) export(w http.ResponseWriter, r *http.Request) {
 	f := filter(r)
 	if f.Marketplace == "" { fail(w, 400, "Unsupported marketplace"); return }
+	market := f.Marketplace
 	rs, e := s.DB.Results(r.Context(), f)
 	if e != nil {
 		fail(w, 500, "Could not export results")
@@ -503,14 +504,14 @@ func (s *Server) export(w http.ResponseWriter, r *http.Request) {
 		index, _ := f.GetSheetIndex("Summary")
 		f.SetActiveSheet(index)
 		w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-returns.xlsx"`, f.Marketplace))
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-returns.xlsx"`, market))
 		if e = f.Write(w); e != nil {
 			slog.Error("xlsx response", "error", e)
 		}
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-returns.csv"`, f.Marketplace))
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-returns.csv"`, market))
 	c := csv.NewWriter(w)
 	c.WriteAll(data)
 }
