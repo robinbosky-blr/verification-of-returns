@@ -13,7 +13,8 @@ func flipkartDate(value string) time.Time {
 func TestFlipkartProductMissingUsesDay60To120(t *testing.T) {
 	rows := []Row{
 		{Kind: "website", OrderID: "OD1", SKU: "SKU1", Date: flipkartDate("2026-01-01"), Updated: flipkartDate("2026-01-02"), Status: "Return Approved"},
-		{Kind: "payment", OrderID: "OD1", SKU: "SKU1", Date: flipkartDate("2026-01-05"), Type: "Refund", Amount: 35000},
+		{Kind: "payment", OrderID: "OD1", SKU: "SKU1", Date: flipkartDate("2026-01-05"), Type: "Refund", Amount: -35000},
+		{Kind: "payment", OrderID: "COVERAGE", Date: flipkartDate("2026-02-05"), Type: "Sale", Amount: 100},
 	}
 	results, err := ReconcileMarketplace("flipkart", rows, flipkartDate("2026-03-15"))
 	if err != nil || len(results) != 1 {
@@ -69,5 +70,48 @@ func TestFlipkartAllocatesOrderOnlyPhysicalAndItemPayment(t *testing.T) {
 	}
 	results, err := ReconcileMarketplace("flipkart", rows, flipkartDate("2026-08-01"))
 	if err != nil || len(results) != 1 { t.Fatal(results, err) }
-	if results[0].Receipt != "Received" || results[0].RefundTotal != -21200 || results[0].Loss != 21200 { t.Fatal(results[0]) }
+	if results[0].Receipt != "Received" || results[0].Financial != "Not Investigated — Received" || results[0].RefundTotal != 0 || results[0].Loss != 0 { t.Fatal(results[0]) }
+}
+
+func TestFlipkartPaymentWindowNetsSignedRefundAdjustments(t *testing.T) {
+	rows := []Row{
+		{Kind: "website", OrderID: "OD5", SKU: "SKU5", Date: flipkartDate("2026-06-10"), Updated: flipkartDate("2026-06-11"), Status: "approved"},
+		{Kind: "payment", OrderID: "OD5", SKU: "SKU5", Date: flipkartDate("2026-06-20"), Type: "Refund", Amount: -30000},
+		{Kind: "payment", OrderID: "OD5", SKU: "SKU5", Date: flipkartDate("2026-07-02"), Type: "Refund", Amount: 30000},
+	}
+	results, err := ReconcileMarketplace("flipkart", rows, flipkartDate("2026-08-01"))
+	if err != nil || len(results) != 1 { t.Fatal(results, err) }
+	if results[0].Financial != "Not Debited" || results[0].RefundTotal != 0 || results[0].Loss != 0 || results[0].ClaimStatus != "No Claim" { t.Fatal(results[0]) }
+}
+
+func TestFlipkartPaymentWindowMustBeComplete(t *testing.T) {
+	rows := []Row{
+		{Kind: "website", OrderID: "OD6", SKU: "SKU6", Date: flipkartDate("2026-07-01"), Updated: flipkartDate("2026-07-02"), Status: "approved"},
+		{Kind: "payment", OrderID: "OD6", SKU: "SKU6", Date: flipkartDate("2026-07-20"), Type: "Refund", Amount: -10000},
+	}
+	results, err := ReconcileMarketplace("flipkart", rows, flipkartDate("2026-09-01"))
+	if err != nil || len(results) != 1 { t.Fatal(results, err) }
+	if results[0].Financial != "Window Incomplete" || results[0].ClaimStatus != "Review" { t.Fatal(results[0]) }
+}
+
+func TestFlipkartPaymentOutsideTwoMonthWindowIsIgnored(t *testing.T) {
+	rows := []Row{
+		{Kind: "website", OrderID: "OD7", SKU: "SKU7", Date: flipkartDate("2026-06-01"), Updated: flipkartDate("2026-06-02"), Status: "approved"},
+		{Kind: "payment", OrderID: "COVER-JUNE", Date: flipkartDate("2026-06-03"), Type: "Sale", Amount: 100},
+		{Kind: "payment", OrderID: "COVER-JULY", Date: flipkartDate("2026-07-03"), Type: "Sale", Amount: 100},
+		{Kind: "payment", OrderID: "OD7", SKU: "SKU7", Date: flipkartDate("2026-08-03"), Type: "Refund", Amount: -9000},
+	}
+	results, err := ReconcileMarketplace("flipkart", rows, flipkartDate("2026-09-01"))
+	if err != nil || len(results) != 1 { t.Fatal(results, err) }
+	if results[0].Financial != "Payment Not Found" || results[0].RefundTotal != 0 { t.Fatal(results[0]) }
+}
+
+func TestFlipkartConflictingOrderItemIsNotSilentlyMatched(t *testing.T) {
+	rows := []Row{
+		{Kind: "website", OrderID: "OD8", SKU: "SKU8", ReferenceID: "ITEM8", Date: flipkartDate("2026-07-01"), Updated: flipkartDate("2026-07-02"), Status: "approved"},
+		{Kind: "physical", OrderID: "OD8", SKU: "SKU8", ReferenceID: "DIFFERENT-ITEM", Date: flipkartDate("2026-07-20")},
+	}
+	results, err := ReconcileMarketplace("flipkart", rows, flipkartDate("2026-08-01"))
+	if err != nil || len(results) != 1 { t.Fatal(results, err) }
+	if results[0].Receipt != "Not Received" || len(results[0].Notes) == 0 { t.Fatal(results[0]) }
 }

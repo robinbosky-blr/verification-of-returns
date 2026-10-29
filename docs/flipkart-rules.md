@@ -28,9 +28,17 @@ The 7-day appeal and 12-day decision TAT are manual-claim follow-up dates. They 
 ## Flipkart money contract
 
 - Customer return/refund debit creates product exposure.
+- Refund transactions retain their sign and are netted only across the Website
+  return month plus the next month.
+- Until both required payment months are loaded, the financial status is
+  `Window Incomplete`. When both are loaded and no match exists, it is
+  `Payment Not Found` rather than a zero transaction.
+- A negative net refund is `Debited`; a zero or positive net refund is
+  `Not Debited`, including a debit that was fully reversed.
 - Only actual Flipkart SPF/product reimbursement reduces current product loss.
 - Fee or commission refunds are reported separately and never reduce product loss.
 - Unsupported Flipkart transaction descriptions are classified as `Payment Review`; they are not silently treated as reimbursement.
+- Physically received cases are not investigated as missing-return payment claims.
 
 ## Manual claim contract
 

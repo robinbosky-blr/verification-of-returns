@@ -1021,7 +1021,7 @@
                   void load();
                 }}
                 ><option value="">All payment statuses</option
-                >{#each ['Debited', 'Not Debited', 'Already Reimbursed', 'Partially Reimbursed', 'Payment Data Missing', 'Payment Review'] as f}<option
+                >{#each marketplace === 'flipkart' ? ['Debited', 'Not Debited', 'Already Reimbursed', 'Partially Reimbursed', 'Window Incomplete', 'Payment Not Found', 'Payment Review'] : ['Debited', 'Not Debited', 'Already Reimbursed', 'Partially Reimbursed', 'Payment Data Missing', 'Payment Review'] as f}<option
                     >{f}</option
                   >{/each}</select
               ><button class="secondary" onclick={() => exportFile('csv')}

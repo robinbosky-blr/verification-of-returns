@@ -196,3 +196,34 @@ func TestFlipkartSettlementLayoutCreatesProductTransactions(t *testing.T) {
 	want := map[string]int64{"SALE": 21200, "REFUND": -21200, "SPF REIMBURSEMENT": 5000, "FEE REFUND": 500}
 	for _, row := range rows { if row.Amount != want[row.Type] || row.ReferenceID != "ITEM1" { t.Fatal(rows) } }
 }
+
+func TestFlipkartPrimaryOrderNeverFallsBackToOrderItem(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "website.csv")
+	os.WriteFile(p, []byte("Order Item ID,SKU,Return Requested Date,Return Status\nITEM1,SKU1,01/07/2026,approved\n"), 0600)
+	_, e := Parse(p, Options{Marketplace: "flipkart", Kind: "website", Filename: "website.csv"}, func(r domain.Row) error { return nil })
+	if e == nil { t.Fatal("expected missing primary Order ID header") }
+}
+
+func TestFlipkartFSNIsNotSilentlyUsedAsSKU(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "website.csv")
+	os.WriteFile(p, []byte("Order ID,FSN,Return Requested Date,Return Status\nOD1,FSN1,01/07/2026,approved\n"), 0600)
+	_, e := Parse(p, Options{Marketplace: "flipkart", Kind: "website", Filename: "website.csv"}, func(r domain.Row) error { return nil })
+	if e == nil { t.Fatal("expected missing Seller SKU header") }
+}
+
+func TestFlipkartPreservesAllOriginalColumns(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "website.csv")
+	os.WriteFile(p, []byte("Order ID,Order Item ID,SKU,Return Requested Date,Return Status,Vendor Name,Custom Future Column\nOD1,ITEM1,SKU1,01/07/2026,approved,Vendor A,keep me\n"), 0600)
+	var row domain.Row
+	_, e := Parse(p, Options{Marketplace: "flipkart", Kind: "website", Filename: "website.csv"}, func(r domain.Row) error { row = r; return nil })
+	if e != nil { t.Fatal(e) }
+	if row.Raw["Vendor Name"] != "Vendor A" || row.Raw["Custom Future Column"] != "keep me" || row.Raw["canonical.order"] != "OD1" { t.Fatal(row.Raw) }
+}
+
+func TestFlipkartExplicitZeroRefundIsPreserved(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "payment.csv")
+	os.WriteFile(p, []byte("Payment Date,Order ID,Order item ID,Refund (Rs.)\n2026-07-29,OD1,ITEM1,0\n"), 0600)
+	var rows []domain.Row
+	_, e := Parse(p, Options{Marketplace: "flipkart", Kind: "payment", Filename: "payment.csv"}, func(r domain.Row) error { rows = append(rows, r); return nil })
+	if e != nil || len(rows) != 1 || rows[0].Type != "REFUND" || rows[0].Amount != 0 { t.Fatal(rows, e) }
+}

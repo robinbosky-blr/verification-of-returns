@@ -28,6 +28,25 @@ func header(s string) string {
 	return headerNoise.ReplaceAllString(strings.ToLower(strings.TrimPrefix(s, "\ufeff")), "")
 }
 
+// uniqueSourceHeaders preserves every original source column in Row.Raw. Empty
+// headers are ignored and duplicate labels receive a stable suffix.
+func uniqueSourceHeaders(row []string) []string {
+	out := make([]string, len(row))
+	seen := map[string]int{}
+	for i, value := range row {
+		name := strings.TrimSpace(strings.TrimPrefix(value, "\ufeff"))
+		if name == "" {
+			continue
+		}
+		seen[name]++
+		out[i] = name
+		if seen[name] > 1 {
+			out[i] = fmt.Sprintf("%s #%d", name, seen[name])
+		}
+	}
+	return out
+}
+
 var aliases = map[string][]string{
 	"order":     {"customerorderid", "orderid", "amazonorderid", "merchantorderid", "orderno", "ordernumber"},
 	"sku":       {"msku", "sku", "sellersku", "merchantsku"},
@@ -52,8 +71,10 @@ var aliases = map[string][]string{
 
 var flipkartSourceAliases = map[string]map[string][]string{
 	"website": {
-		"order": {"orderid", "orderitemid", "orderunitid", "shipmentid", "returnid"},
-		"sku": {"sku", "sellersku", "merchantsku", "fsn"},
+		// Order Item ID, Return ID, Shipment ID and FSN are verification fields.
+		// They must never be silently promoted to the primary Order ID or SKU.
+		"order": {"orderid"},
+		"sku": {"sku", "sellersku", "merchantsku"},
 		"date": {"returncreationdate", "returnrequesteddate", "returnrequestdate", "returndate", "createddate"},
 		"updated": {"lastupdateddate", "lastupdatedon", "statusupdateddate", "updateddate"},
 		"approval": {"returnapprovaldate"},
@@ -66,14 +87,14 @@ var flipkartSourceAliases = map[string]map[string][]string{
 		"reference": {"orderitemid"},
 	},
 	"physical": {
-		"order": {"orderid", "orderitemid", "orderunitid", "shipmentid", "returnid"},
-		"sku": {"sku", "sellersku", "fsn"},
+		"order": {"orderid"},
+		"sku": {"sku", "sellersku"},
 		"date": {"receiveddate", "physicalreceiveddate", "returndate", "date"},
 		"reference": {"orderitemid"},
 	},
 	"payment": {
-		"order": {"orderid", "orderitemid", "orderunitid", "shipmentid"},
-		"sku": {"sku", "sellersku", "fsn"},
+		"order": {"orderid"},
+		"sku": {"sku", "sellersku"},
 		"date": {"paymentdate", "transactiondate", "settlementdate", "date"},
 		"type": {"transactiontype", "paymenttype", "type", "description"},
 		"amount": {"amount", "totalamount", "netamount", "settlementvalue", "total"},
@@ -217,6 +238,7 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 	var st Stats
 	parseSheet := func(name string, optional bool, next func() ([]string, error)) error {
 		var cols map[string]int
+		var sourceHeaders []string
 		var previous string
 		line := 0
 		sawContent := false
@@ -244,6 +266,7 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 			possible := fields(cells, o.Kind, o.Marketplace)
 			if validHeader(possible, o.Kind, o.Marketplace) {
 				cols = possible
+				sourceHeaders = uniqueSourceHeaders(cells)
 				previous = ""
 				continue
 			}
@@ -283,9 +306,14 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 				return fmt.Errorf("%s row %d: SKU is missing", name, line)
 			}
 			r := domain.Row{Marketplace: o.Marketplace, Kind: o.Kind, OrderID: order, SKU: sku, Status: get("status"), Reason: get("reason"), Type: get("type"), Channel: get("channel"), ReferenceID: domain.Normalize(get("reference")), Quantity: 1, Source: name, Line: line, Raw: map[string]string{}}
+			for i, key := range sourceHeaders {
+				if key != "" && i < len(cells) {
+					r.Raw[key] = cells[i]
+				}
+			}
 			for k, i := range cols {
 				if i < len(cells) {
-					r.Raw[k] = cells[i]
+					r.Raw["canonical."+k] = cells[i]
 				}
 			}
 			if q := get("quantity"); q != "" {
@@ -335,18 +363,49 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 				}
 			}
 			if o.Kind == "payment" && strings.EqualFold(o.Marketplace, "flipkart") {
-				_, hasSale := cols["sale"]; _, hasRefund := cols["refund"]; _, hasProtection := cols["protection"]
+				_, hasSale := cols["sale"]
+				_, hasRefund := cols["refund"]
+				_, hasProtection := cols["protection"]
 				if hasSale || hasRefund || hasProtection {
+					emittedProduct := false
 					for _, transaction := range []struct{ Type, Field string }{{"SALE", "sale"}, {"REFUND", "refund"}, {"SPF REIMBURSEMENT", "protection"}} {
 						amount, parseErr := domain.Money(get(transaction.Field))
-						if parseErr != nil { return fmt.Errorf("%s row %d %s: %w", name, line, transaction.Field, parseErr) }
-						if amount == 0 { continue }
-						payment := r; payment.Type = transaction.Type; payment.Amount = amount
-						if e = emit(payment); e != nil { return e }; st.Rows++
+						if parseErr != nil {
+							return fmt.Errorf("%s row %d %s: %w", name, line, transaction.Field, parseErr)
+						}
+						if amount == 0 {
+							continue
+						}
+						payment := r
+						payment.Type = transaction.Type
+						payment.Amount = amount
+						if e = emit(payment); e != nil {
+							return e
+						}
+						st.Rows++
+						emittedProduct = true
+					}
+					if !emittedProduct && hasRefund && strings.TrimSpace(get("refund")) != "" {
+						payment := r
+						payment.Type = "REFUND"
+						if e = emit(payment); e != nil {
+							return e
+						}
+						st.Rows++
 					}
 					fee, parseErr := domain.Money(get("marketplace_fee"))
-					if parseErr != nil { return fmt.Errorf("%s row %d marketplace fee: %w", name, line, parseErr) }
-					if fee > 0 { payment := r; payment.Type = "FEE REFUND"; payment.Amount = fee; if e = emit(payment); e != nil { return e }; st.Rows++ }
+					if parseErr != nil {
+						return fmt.Errorf("%s row %d marketplace fee: %w", name, line, parseErr)
+					}
+					if fee > 0 {
+						payment := r
+						payment.Type = "FEE REFUND"
+						payment.Amount = fee
+						if e = emit(payment); e != nil {
+							return e
+						}
+						st.Rows++
+					}
 					continue
 				}
 			}

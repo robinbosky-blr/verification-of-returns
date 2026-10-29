@@ -24,6 +24,7 @@ export type SourceRow = {
   line: number;
   imported_at: string;
   occurrence?: number;
+  raw?: Record<string, string>;
 };
 
 type ClaimData = Pick<
@@ -102,6 +103,17 @@ const normalize = (value: unknown) => clean(value).replace(/\s+/g, ' ').toUpperC
 const keyOf = (order: string, sku: string) => `${normalize(order)}\u001f${normalize(sku)}`;
 const header = (value: unknown) => clean(value).toLowerCase().replace(/[^a-z0-9]/g, '');
 
+function uniqueSourceHeaders(row: unknown[]): string[] {
+  const seen = new Map<string, number>();
+  return row.map((value) => {
+    const name = clean(value);
+    if (!name) return '';
+    const count = (seen.get(name) ?? 0) + 1;
+    seen.set(name, count);
+    return count === 1 ? name : `${name} #${count}`;
+  });
+}
+
 const aliases: Record<string, string[]> = {
   order: ['customerorderid', 'orderid', 'amazonorderid', 'merchantorderid', 'orderno', 'ordernumber'],
   sku: ['msku', 'sku', 'sellersku', 'merchantsku'],
@@ -145,8 +157,9 @@ const amazonSourceAliases: Record<SourceRow['kind'], Partial<Record<string, stri
 
 const flipkartSourceAliases: Record<SourceRow['kind'], Partial<Record<string, string[]>>> = {
   website: {
-    order: ['orderid', 'orderitemid', 'orderunitid', 'shipmentid', 'returnid'],
-    sku: ['sku', 'sellersku', 'merchantsku', 'fsn'],
+    // Verification IDs are intentionally separate. They never replace Order ID or SKU.
+    order: ['orderid'],
+    sku: ['sku', 'sellersku', 'merchantsku'],
     date: ['returncreationdate', 'returnrequesteddate', 'returnrequestdate', 'returndate', 'createddate'],
     updated: ['lastupdateddate', 'lastupdatedon', 'statusupdateddate', 'updateddate'],
     approval: ['returnapprovaldate'],
@@ -159,14 +172,14 @@ const flipkartSourceAliases: Record<SourceRow['kind'], Partial<Record<string, st
     reference: ['orderitemid']
   },
   physical: {
-    order: ['orderid', 'orderitemid', 'orderunitid', 'shipmentid', 'returnid'],
-    sku: ['sku', 'sellersku', 'fsn'],
+    order: ['orderid'],
+    sku: ['sku', 'sellersku'],
     date: ['receiveddate', 'physicalreceiveddate', 'returndate', 'date'],
     reference: ['orderitemid']
   },
   payment: {
-    order: ['orderid', 'orderitemid', 'orderunitid', 'shipmentid'],
-    sku: ['sku', 'sellersku', 'fsn'],
+    order: ['orderid'],
+    sku: ['sku', 'sellersku'],
     date: ['paymentdate', 'transactiondate', 'settlementdate', 'date'],
     type: ['transactiontype', 'paymenttype', 'type', 'description'],
     amount: ['amount', 'totalamount', 'netamount', 'settlementvalue', 'total'],
@@ -264,13 +277,14 @@ function money(value: unknown): number {
 
 function parseSheet(data: unknown[][], name: string, marketplace: Marketplace, kind: SourceRow['kind'], coverage: string, importId: string, importedAt: string, optionalSheet = false): SourceRow[] {
   let cols: Record<string, number> | null = null;
+  let sourceHeaders: string[] = [];
   let previousOrder = '';
   const output: SourceRow[] = [];
   for (let index = 0; index < data.length; index++) {
     const cells = data[index] ?? [];
     if (!cells.some((v) => clean(v))) { previousOrder = ''; continue; }
     const possible = columns(cells, kind, marketplace);
-    if (validColumns(possible, kind, marketplace)) { cols = possible; previousOrder = ''; continue; }
+    if (validColumns(possible, kind, marketplace)) { cols = possible; sourceHeaders = uniqueSourceHeaders(cells); previousOrder = ''; continue; }
     if (!cols) {
       if (index >= 49) break;
       continue;
@@ -307,6 +321,9 @@ function parseSheet(data: unknown[][], name: string, marketplace: Marketplace, k
     let delivered = '';
     if (clean(get('delivered'))) delivered = isoDate(get('delivered'), 'Delivered Date');
     let amount = 0;
+    const raw: Record<string, string> = {};
+    sourceHeaders.forEach((sourceHeader, columnIndex) => { if (sourceHeader) raw[sourceHeader] = clean(cells[columnIndex]); });
+    Object.entries(cols).forEach(([field, columnIndex]) => { raw[`canonical.${field}`] = clean(cells[columnIndex]); });
     const base: SourceRow = {
       import_id: importId,
       kind,
@@ -323,7 +340,8 @@ function parseSheet(data: unknown[][], name: string, marketplace: Marketplace, k
       amount,
       source: name,
       line: index + 1,
-      imported_at: importedAt
+      imported_at: importedAt,
+      raw
     };
     if (kind === 'payment' && marketplace === 'flipkart' && (cols.sale !== undefined || cols.refund !== undefined || cols.protection !== undefined)) {
       const transactions: Array<[string, unknown]> = [
@@ -331,10 +349,15 @@ function parseSheet(data: unknown[][], name: string, marketplace: Marketplace, k
         ['REFUND', get('refund')],
         ['SPF REIMBURSEMENT', get('protection')]
       ];
+      let emittedProduct = false;
       for (const [type, value] of transactions) {
         const transactionAmount = money(value);
-        if (transactionAmount) output.push({ ...base, type, amount: transactionAmount });
+        if (transactionAmount) {
+          output.push({ ...base, type, amount: transactionAmount });
+          emittedProduct = true;
+        }
       }
+      if (!emittedProduct && cols.refund !== undefined && clean(get('refund'))) output.push({ ...base, type: 'REFUND', amount: 0 });
       const fee = money(get('marketplace_fee'));
       if (fee > 0) output.push({ ...base, type: 'FEE REFUND', amount: fee });
       continue;
@@ -577,6 +600,7 @@ function claimWindow(result: Case, open: string, deadline: string, rule: string,
 
 function reconcileFlipkartBrowser(state: BrowserState): Case[] {
   const rows = activeRows(state);
+  const paymentMonths = new Set(rows.filter((row) => row.kind === 'payment').map((row) => monthOf(row.date)));
   const website = new Map<string, SourceRow[]>(), physical = new Map<string, SourceRow[]>(), payments = new Map<string, SourceRow[]>();
   const orderKeys = new Map<string, Set<string>>(), itemKeys = new Map<string, Set<string>>();
   for (const row of rows.filter((item) => item.kind === 'website')) {
@@ -586,9 +610,16 @@ function reconcileFlipkartBrowser(state: BrowserState): Case[] {
     if (row.reference_id) { const byItem = itemKeys.get(row.reference_id) ?? new Set<string>(); byItem.add(key); itemKeys.set(row.reference_id, byItem); }
   }
   const resolveCase = (row: SourceRow) => {
-    if (row.sku) { const direct = keyOf(row.order_id, row.sku); if (website.has(direct)) return direct; }
+    let direct = '';
+    if (row.sku) { const candidate = keyOf(row.order_id, row.sku); if (website.has(candidate)) direct = candidate; }
     const byItem = row.reference_id ? itemKeys.get(row.reference_id) : undefined;
-    if (byItem?.size === 1) return [...byItem][0];
+    if (row.reference_id) {
+      if (byItem?.size !== 1) return '';
+      const item = [...byItem][0];
+      if (direct && item !== direct) return '';
+      return item;
+    }
+    if (direct) return direct;
     const byOrder = orderKeys.get(row.order_id);
     if (byOrder?.size === 1) return [...byOrder][0];
     return '';
@@ -610,7 +641,7 @@ function reconcileFlipkartBrowser(state: BrowserState): Case[] {
     const result: Case = {
       key, order_id: latest.order_id, sku: latest.sku, month: monthOf(first), status: latest.status,
       receipt: received ? 'Received' : 'Not Received', received_month: received ? monthOf(receivedRows[0].date) : '',
-      financial: 'Payment Data Missing', scenario: '', order_total: 0, refund_total: 0, fee_refund: 0,
+      financial: 'Payment Not Found', scenario: '', order_total: 0, refund_total: 0, fee_refund: 0,
       reimbursement: 0, net: 0, loss: 0, recovered: 0, refund_date: '', updated: latest.updated,
       delivered: received ? receivedRows[0].date : latest.delivered, claim_rule: '', claim_open: '', claim_deadline: '',
       claim_status: 'Review', claim_raised: false, claim_raised_date: '', user_claim_status: 'Not Raised',
@@ -621,39 +652,53 @@ function reconcileFlipkartBrowser(state: BrowserState): Case[] {
     if (ambiguous.get(latest.order_id)) result.notes.push(`${ambiguous.get(latest.order_id)} Flipkart row(s) need Order Item ID or SKU for allocation.`);
     const manual = state.claims[key];
     if (manual) Object.assign(result, manual);
-    const tx = payments.get(key) ?? [];
-    let hasRefund = false, unsupported = false;
+    const classification = normalize(`${latest.status} ${latest.reason} ${latest.channel}`);
+    if (received) {
+      result.financial = 'Not Investigated — Received';
+      if (['DAMAGED', 'DEFECTIVE', 'WRONG ITEM'].some((value) => classification.includes(value))) {
+        claimWindow(result, receivedRows[0].date, addDays(receivedRows[0].date, 14), 'SPF received condition claim · within 14 days', now);
+      } else if (classification.includes('IN TRANSIT')) {
+        claimWindow(result, addDays(receivedRows[0].date, 1), addDays(first, 120), 'In transit but physically received · wait 24 hours', now);
+      } else result.claim_status = 'No Claim';
+      output.push(result);
+      continue;
+    }
+    const caseMonth = result.month, following = nextMonth(caseMonth);
+    const windowComplete = paymentMonths.has(caseMonth) && paymentMonths.has(following);
+    const tx = (payments.get(key) ?? []).filter((payment) => [caseMonth, following].includes(monthOf(payment.date)));
+    let hasRefund = false, hadNegativeRefund = false, unsupported = false;
     for (const payment of tx) {
       result.evidence!.push(evidence(payment));
       result.net += payment.amount;
       const type = normalize(payment.type);
       if (['ORDER', 'SALE', 'SALE OF PRODUCT', 'PRODUCT SALE'].includes(type)) result.order_total += payment.amount;
       else if (['REFUND', 'RETURN', 'CUSTOMER REFUND', 'REFUND FOR RETURN', 'RETURN REFUND'].includes(type)) {
-        hasRefund = true; result.refund_total -= Math.abs(payment.amount);
+        hasRefund = true; hadNegativeRefund ||= payment.amount < 0; result.refund_total += payment.amount;
         if (!result.refund_date || payment.date < result.refund_date) result.refund_date = payment.date;
       } else if (type.includes('SPF') || type.includes('SELLER PROTECTION FUND') || type.includes('REIMBURSEMENT')) {
         result.reimbursement += Math.abs(payment.amount);
       } else if (type.includes('FEE REFUND') || type.includes('COMMISSION REFUND')) result.fee_refund += Math.abs(payment.amount);
       else { unsupported = true; result.notes.push(`Unclassified Flipkart payment type: ${payment.type}`); }
     }
-    result.scenario = hasRefund ? (result.order_total ? 'Sale + Refund' : 'Refund Only') : 'Sale Only';
-    if (result.reimbursement) result.scenario += ' + SPF Recovery';
-    if (!tx.length) result.financial = received ? 'Not Investigated — Received' : 'Payment Data Missing';
-    else if (!hasRefund) result.financial = 'Not Debited';
-    else {
-      const gross = Math.abs(result.refund_total);
+    if (!windowComplete) {
+      result.financial = 'Window Incomplete';
+      result.notes.push(`Payment window requires ${caseMonth} and ${following}.`);
+    } else if (!tx.length) result.financial = 'Payment Not Found';
+    else if (!hasRefund || result.refund_total >= 0) {
+      result.financial = 'Not Debited';
+      result.scenario = hasRefund ? 'Refund Net Not Debited' : 'Sale Only';
+      if (hadNegativeRefund && result.refund_total === 0) result.notes.push('Debit reversed within the payment window.');
+    } else {
+      result.scenario = result.order_total ? 'Sale + Refund' : 'Refund Only';
+      const gross = -result.refund_total;
       result.recovered = Math.min(gross, Math.max(0, result.reimbursement));
       result.loss = gross - result.recovered;
       result.financial = result.loss === 0 ? 'Already Reimbursed' : result.recovered > 0 ? 'Partially Reimbursed' : 'Debited';
+      if (result.reimbursement) result.scenario += ' + SPF Recovery';
     }
-    const classification = normalize(`${latest.status} ${latest.reason} ${latest.channel}`);
-    if (received && ['DAMAGED', 'DEFECTIVE', 'WRONG ITEM'].some((value) => classification.includes(value))) {
-      claimWindow(result, receivedRows[0].date, addDays(receivedRows[0].date, 14), 'SPF received condition claim · within 14 days', now);
-    } else if (received && classification.includes('IN TRANSIT')) {
-      claimWindow(result, addDays(receivedRows[0].date, 1), addDays(first, 120), 'In transit but physically received · wait 24 hours', now);
-    } else if (!received && (hasRefund || classification.includes('DO NOT EXPECT') || classification.includes('DNE'))) {
+    if (result.financial === 'Debited' || result.financial === 'Partially Reimbursed') {
       claimWindow(result, addDays(first, 60), addDays(first, 120), classification.includes('DO NOT EXPECT') || classification.includes('DNE') ? 'DNE physical delivery · day 60 to day 120' : 'Product Missing · day 60 to day 120', now);
-    } else if (result.financial === 'Already Reimbursed' || result.financial === 'Not Debited' || received) result.claim_status = 'No Claim';
+    } else if (result.financial === 'Already Reimbursed' || result.financial === 'Not Debited') result.claim_status = 'No Claim';
     else result.claim_status = 'Review';
     if (unsupported) { result.financial = 'Payment Review'; result.claim_status = 'Review'; result.notes.push('Flipkart payment allocation requires review.'); }
     output.push(result);
