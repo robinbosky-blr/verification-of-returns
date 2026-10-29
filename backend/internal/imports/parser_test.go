@@ -227,3 +227,12 @@ func TestFlipkartExplicitZeroRefundIsPreserved(t *testing.T) {
 	_, e := Parse(p, Options{Marketplace: "flipkart", Kind: "payment", Filename: "payment.csv"}, func(r domain.Row) error { rows = append(rows, r); return nil })
 	if e != nil || len(rows) != 1 || rows[0].Type != "REFUND" || rows[0].Amount != 0 { t.Fatal(rows, e) }
 }
+
+func TestFlipkartBlankReturnStatusDoesNotBlockOtherRows(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "website.csv")
+	os.WriteFile(p, []byte("Order ID,Order Item ID,SKU,Return Requested Date,Return Status\nOD1,ITEM1,SKU1,01/07/2026,\nOD2,ITEM2,SKU2,02/07/2026,approved\n"), 0600)
+	var rows []domain.Row
+	_, e := Parse(p, Options{Marketplace: "flipkart", Kind: "website", Filename: "website.csv"}, func(r domain.Row) error { rows = append(rows, r); return nil })
+	if e != nil || len(rows) != 2 { t.Fatal(rows, e) }
+	if rows[0].Status != "Return Status Not Found" || rows[1].Status != "approved" { t.Fatal(rows) }
+}

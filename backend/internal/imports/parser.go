@@ -343,7 +343,11 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 					}
 				}
 				if r.Status == "" {
-					return fmt.Errorf("%s row %d: status missing", name, line)
+					if strings.EqualFold(o.Marketplace, "flipkart") {
+						r.Status = "Return Status Not Found"
+					} else {
+						return fmt.Errorf("%s row %d: status missing", name, line)
+					}
 				}
 			} else {
 				if get("date") == "" && o.Kind == "physical" {

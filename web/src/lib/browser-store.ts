@@ -310,7 +310,7 @@ function parseSheet(data: unknown[][], name: string, marketplace: Marketplace, k
       catch (error) { throw new Error(`${name} row ${index + 1}: ${(error as Error).message}`); }
       try { rowDate = clean(get('date')) ? isoDate(get('date'), 'Return Date') : updated; }
       catch (error) { throw new Error(`${name} row ${index + 1}: ${(error as Error).message}`); }
-      if (!clean(get('status'))) throw new Error(`${name} row ${index + 1}: Return Status is missing.`);
+      if (!clean(get('status')) && marketplace !== 'flipkart') throw new Error(`${name} row ${index + 1}: Return Status is missing.`);
     } else {
       try {
         if (kind === 'physical' && !clean(get('date'))) rowDate = isoDate(`${monthFromSheet(name, coverage)}-01`, 'Physical Receipt Date');
@@ -332,7 +332,7 @@ function parseSheet(data: unknown[][], name: string, marketplace: Marketplace, k
       date: rowDate,
       updated,
       delivered,
-      status: clean(get('status')),
+      status: clean(get('status')) || (marketplace === 'flipkart' && kind === 'website' ? 'Return Status Not Found' : ''),
       reason: clean(get('reason')),
       type: clean(get('type')),
       channel: clean(get('channel')),
