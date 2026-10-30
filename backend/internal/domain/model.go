@@ -10,6 +10,7 @@ import (
 
 const RuleVersion = "amazon-seller-v1"
 const FlipkartRuleVersion = "flipkart-spf-v1"
+const MyntraRuleVersion = "myntra-spf-v1"
 
 var IST = time.FixedZone("Asia/Kolkata", 19800)
 
@@ -26,6 +27,9 @@ type Row struct {
 	Type        string            `json:"type"`
 	Channel     string            `json:"channel"`
 	ReferenceID string            `json:"reference_id"`
+	PacketID string               `json:"packet_id"`
+	SellerOrderID string          `json:"seller_order_id"`
+	OrderLineID string            `json:"order_line_id"`
 	ImportedAt  time.Time         `json:"imported_at"`
 	Amount      int64             `json:"amount"`
 	Quantity    int64             `json:"quantity"`

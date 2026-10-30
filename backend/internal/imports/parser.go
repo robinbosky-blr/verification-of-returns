@@ -67,6 +67,36 @@ var aliases = map[string][]string{
 	"refund": {"refundrs"},
 	"protection": {"protectionfundrs"},
 	"marketplace_fee": {"marketplacefeerssumvai", "marketplacefeers"},
+	"packet": {"packetid", "storepacketid"},
+	"seller_order": {"sellerorderid"},
+	"order_line": {"orderlineid", "orderitemid"},
+	"rto_date": {"orderrtodate", "rtocreateddate", "rtocreationdate"},
+}
+
+var myntraSourceAliases = map[string]map[string][]string{
+	"website": {
+		"order": {"orderid", "myntraorderid", "sellerorderid"}, "sku": {"sellerskucode", "sellersku", "sku"},
+		"date": {"returncreateddate", "returncreationdate", "returncreatedon", "returncreatedat"},
+		"updated": {"lmdolastmodifiedon", "lastmodifiedon", "lastupdatedon", "updatedat", "returncreateddate", "returncreationdate", "orderrtodate"},
+		"delivered": {"returndelivereddate", "returnreceiveddate", "delivereddatetoseller"},
+		"status": {"returnstatus", "status"}, "channel": {"returntype", "fulfilmentmodel", "fulfillmentmodel"},
+		"reason": {"returnreason", "reason"}, "quantity": {"quantity", "qty"},
+		"reference": {"returnid"}, "packet": {"storepacketid", "packetid"},
+		"seller_order": {"sellerorderid"}, "order_line": {"orderlineid"}, "rto_date": {"orderrtodate", "rtocreationdate"},
+	},
+	"physical": {
+		"order": {"orderid", "myntraorderid"}, "sku": {"sellerskucode", "sellersku", "sku"},
+		"date": {"physicalreceiveddate", "receiveddate", "dateofreceived", "returndate", "date"},
+		"order_line": {"orderlineid"}, "quantity": {"quantity", "qty"}, "reference": {"returnid"},
+	},
+	"payment": {
+		"order": {"orderid", "myntraorderid", "sellerorderid"}, "sku": {"sellerskucode", "sellersku", "sku"},
+		"date": {"paymentdate", "settlementdate", "transactiondate", "neftdate", "date"},
+		"type": {"ordertype", "transactiontype", "paymenttype", "type"},
+		"amount": {"settledamount", "netsettledamount", "settlementamount", "amount"},
+		"packet": {"packetid", "storepacketid"}, "seller_order": {"sellerorderid"},
+		"order_line": {"orderlineid"}, "reference": {"neftref", "neftreference", "transactionid"},
+	},
 }
 
 var flipkartSourceAliases = map[string]map[string][]string{
@@ -125,7 +155,7 @@ var sourceAliases = map[string]map[string][]string{
 	},
 }
 
-var fieldOrder = []string{"order", "sku", "date", "updated", "approval", "completed", "out_for_delivery", "delivered", "status", "type", "amount", "sale", "refund", "protection", "marketplace_fee", "quantity", "channel", "reason", "reference"}
+var fieldOrder = []string{"order", "sku", "date", "updated", "approval", "completed", "out_for_delivery", "delivered", "status", "type", "amount", "sale", "refund", "protection", "marketplace_fee", "quantity", "channel", "reason", "reference", "packet", "seller_order", "order_line", "rto_date"}
 
 func fields(row []string, kind, marketplace string) map[string]int {
 	m := map[string]int{}
@@ -138,6 +168,8 @@ func fields(row []string, kind, marketplace string) map[string]int {
 		configuredAliases := sourceAliases
 		if strings.EqualFold(marketplace, "flipkart") {
 			configuredAliases = flipkartSourceAliases
+		} else if strings.EqualFold(marketplace, "myntra") {
+			configuredAliases = myntraSourceAliases
 		}
 		if configured, ok := configuredAliases[kind][field]; ok {
 			candidates = configured
@@ -167,7 +199,7 @@ func validHeader(m map[string]int, kind, marketplace string) bool {
 	required := []string{}
 	switch kind {
 	case "website":
-		if strings.EqualFold(marketplace, "flipkart") { required = []string{"date", "status"} } else { required = []string{"updated", "status"} }
+		if strings.EqualFold(marketplace, "flipkart") { required = []string{"date", "status"} } else if strings.EqualFold(marketplace, "myntra") { required = []string{"status"} } else { required = []string{"updated", "status"} }
 	case "payment":
 		if strings.EqualFold(marketplace, "flipkart") {
 			if _, ok := m["date"]; !ok { return false }
@@ -305,7 +337,7 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 			if sku == "" && o.Kind != "payment" && !(strings.EqualFold(o.Marketplace, "flipkart") && o.Kind == "physical") {
 				return fmt.Errorf("%s row %d: SKU is missing", name, line)
 			}
-			r := domain.Row{Marketplace: o.Marketplace, Kind: o.Kind, OrderID: order, SKU: sku, Status: get("status"), Reason: get("reason"), Type: get("type"), Channel: get("channel"), ReferenceID: domain.Normalize(get("reference")), Quantity: 1, Source: name, Line: line, Raw: map[string]string{}}
+			r := domain.Row{Marketplace: o.Marketplace, Kind: o.Kind, OrderID: order, SKU: sku, Status: get("status"), Reason: get("reason"), Type: get("type"), Channel: get("channel"), ReferenceID: domain.Normalize(get("reference")), PacketID: domain.Normalize(get("packet")), SellerOrderID: domain.Normalize(get("seller_order")), OrderLineID: domain.Normalize(get("order_line")), Quantity: 1, Source: name, Line: line, Raw: map[string]string{}}
 			for i, key := range sourceHeaders {
 				if key != "" && i < len(cells) {
 					r.Raw[key] = cells[i]
@@ -329,6 +361,10 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 					for _, candidate := range []string{get("completed"), get("out_for_delivery"), get("approval"), get("date")} {
 						if candidate != "" { updatedValue = candidate; break }
 					}
+				}
+				if strings.EqualFold(o.Marketplace, "myntra") && updatedValue == "" {
+					updatedValue = get("date")
+					if updatedValue == "" { updatedValue = get("rto_date") }
 				}
 				r.Updated, e = ParseDate(updatedValue)
 				if e != nil {
@@ -449,7 +485,7 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 			if e != nil {
 				return e
 			}
-			err := parseSheet(s, strings.EqualFold(o.Marketplace, "flipkart") && len(sheets) > 1, func() ([]string, error) {
+			err := parseSheet(s, (strings.EqualFold(o.Marketplace, "flipkart") || strings.EqualFold(o.Marketplace, "myntra")) && len(sheets) > 1, func() ([]string, error) {
 				if !rows.Next() {
 					if e := rows.Error(); e != nil {
 						return nil, e
@@ -510,7 +546,7 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 			if e != nil {
 				return st, e
 			}
-			err := parseSheet(s, strings.EqualFold(o.Marketplace, "flipkart") && len(sheets) > 1, func() ([]string, error) {
+			err := parseSheet(s, (strings.EqualFold(o.Marketplace, "flipkart") || strings.EqualFold(o.Marketplace, "myntra")) && len(sheets) > 1, func() ([]string, error) {
 				if !rows.Next() {
 					if e := rows.Error(); e != nil {
 						return nil, e

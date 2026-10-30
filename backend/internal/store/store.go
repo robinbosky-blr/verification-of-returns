@@ -101,7 +101,7 @@ func scanImport(row pgx.Row) (i Import, e error) {
 }
 func (s *Store) CreateImport(ctx context.Context, i Import) (Import, bool, error) {
 	if i.Marketplace == "" { i.Marketplace = "amazon" }
-	if i.Marketplace != "amazon" && i.Marketplace != "flipkart" { return i, false, fmt.Errorf("unsupported marketplace") }
+	if i.Marketplace != "amazon" && i.Marketplace != "flipkart" && i.Marketplace != "myntra" { return i, false, fmt.Errorf("unsupported marketplace") }
 	tx, e := s.Pool.Begin(ctx)
 	if e != nil {
 		return i, false, e

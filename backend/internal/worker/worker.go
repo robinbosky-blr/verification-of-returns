@@ -231,6 +231,7 @@ func (w Worker) process(ctx context.Context, tx pgx.Tx, id *string, kind, market
 	var run int64
 	ruleVersion := domain.RuleVersion
 	if marketplace == "flipkart" { ruleVersion = domain.FlipkartRuleVersion }
+	if marketplace == "myntra" { ruleVersion = domain.MyntraRuleVersion }
 	if e = tx.QueryRow(ctx, "INSERT INTO reconciliation_runs(marketplace,rule_version,status,summary,completed_at) VALUES($1,$2,'completed',$3,now()) RETURNING id", marketplace, ruleVersion, string(sb)).Scan(&run); e != nil {
 		return e
 	}

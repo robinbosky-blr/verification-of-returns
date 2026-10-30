@@ -20,6 +20,8 @@ func ReconcileMarketplace(marketplace string, rows []Row, now time.Time) ([]Resu
 		return reconcileAmazon(rows, now)
 	case "flipkart":
 		return reconcileFlipkart(rows, now)
+	case "myntra":
+		return reconcileMyntra(rows, now)
 	default:
 		return nil, fmt.Errorf("unsupported marketplace %q", marketplace)
 	}
@@ -274,9 +276,9 @@ func Summarize(rs []Result) Summary {
 		}
 		s.NotReceived++
 		switch r.Financial {
-		case "Debited", "Partially Reimbursed", "Already Reimbursed":
+		case "Debited", "Partially Reimbursed", "Already Reimbursed", "Financial Loss Detected":
 			s.Debited++
-		case "Not Debited":
+		case "Not Debited", "No Financial Debit Detected":
 			s.NotDebited++
 		default:
 			s.Unknown++

@@ -40,7 +40,7 @@ func marketplace(r *http.Request) string {
 	value := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("marketplace")))
 	if value == "" && r.Method == http.MethodPost { value = strings.ToLower(strings.TrimSpace(r.FormValue("marketplace"))) }
 	if value == "" { return "amazon" }
-	if value == "amazon" || value == "flipkart" { return value }
+	if value == "amazon" || value == "flipkart" || value == "myntra" { return value }
 	return ""
 }
 
@@ -174,7 +174,7 @@ func (s *Server) Handler() http.Handler {
 			fail(w, 500, "Could not load jobs")
 			return
 		}
-		rule := domain.RuleVersion; if market == "flipkart" { rule = domain.FlipkartRuleVersion }
+		rule := domain.RuleVersion; if market == "flipkart" { rule = domain.FlipkartRuleVersion } else if market == "myntra" { rule = domain.MyntraRuleVersion }
 		JSON(w, 200, map[string]any{"months": v, "jobs": jobs, "rule_version": rule})
 	})
 	m.HandleFunc("GET /api/audit", func(w http.ResponseWriter, r *http.Request) {
