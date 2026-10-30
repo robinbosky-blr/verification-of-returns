@@ -322,6 +322,82 @@
   }
   let summary = $derived(overview?.summary);
   let months = $derived(Object.keys(overview?.monthly ?? {}).sort());
+  const isMyntraRTO = (c: Case) => /\bRTO\b/i.test(`${c.status} ${c.claim_rule}`);
+  const myntraCaseType = (c: Case) => (isMyntraRTO(c) ? 'RTO' : 'Return');
+  const claimDaysLeft = (c: Case) => {
+    if (!c.claim_deadline || c.claim_deadline.startsWith('0001')) return null;
+    const today = new Date();
+    const deadline = new Date(c.claim_deadline);
+    return Math.ceil((deadline.getTime() - today.getTime()) / 86_400_000);
+  };
+  const paymentMatch = (c: Case) =>
+    c.scenario?.replace(/^Matched by\s+/i, '') ||
+    (c.financial === 'Payment Match Pending' ? 'Pending' : 'Not required');
+  let myntraRows = $derived(overview?.rows ?? []);
+  let myntraReturnStatuses = $derived(
+    [...new Set(myntraRows.map((c) => c.status).filter(Boolean))].sort()
+  );
+  let myntraDashboard = $derived.by(() => {
+    const rows = myntraRows;
+    const returnRows = rows.filter((c) => !isMyntraRTO(c));
+    const rtoRows = rows.filter(isMyntraRTO);
+    const missing = rows.filter((c) => c.receipt === 'Not Received');
+    const raised = rows.filter(
+      (c) => c.claim_raised || (c.user_claim_status || 'Not Raised') !== 'Not Raised'
+    );
+    const ready = rows.filter(
+      (c) =>
+        c.claim_status === 'Raise Claim' && (c.user_claim_status || 'Not Raised') === 'Not Raised'
+    );
+    const expiring = ready.filter((c) => {
+      const days = claimDaysLeft(c);
+      return days !== null && days >= 0 && days <= 7;
+    });
+    const deadlineRows = rows
+      .filter((c) => c.claim_deadline && !c.claim_deadline.startsWith('0001'))
+      .sort((a, b) => (claimDaysLeft(a) ?? 999999) - (claimDaysLeft(b) ?? 999999))
+      .slice(0, 10);
+    const matchRows = (name: string) => rows.filter((c) => paymentMatch(c) === name);
+    return {
+      total: rows.length,
+      returnReceived: returnRows.filter((c) => c.receipt === 'Received').length,
+      rtoReceived: rtoRows.filter((c) => c.receipt === 'Received').length,
+      returnMissing: returnRows.filter((c) => c.receipt === 'Not Received').length,
+      rtoMissing: rtoRows.filter((c) => c.receipt === 'Not Received').length,
+      paymentPending: missing.filter((c) => c.financial === 'Payment Match Pending').length,
+      lossDetected: missing.filter((c) => c.financial === 'Financial Loss Detected').length,
+      ready: ready.length,
+      waiting: rows.filter((c) => c.claim_status === 'Scheduled').length,
+      expiring: expiring.length,
+      raised: raised.length,
+      underReview: rows.filter((c) => c.user_claim_status === 'Pending').length,
+      approved: rows.filter((c) => c.user_claim_status === 'Approved').length,
+      rejected: rows.filter((c) => c.user_claim_status === 'Rejected').length,
+      paid: rows.filter((c) => c.user_claim_status === 'Paid').length,
+      expired: rows.filter(
+        (c) =>
+          c.claim_status === 'Expired' && (c.user_claim_status || 'Not Raised') === 'Not Raised'
+      ).length,
+      deadlineRows,
+      missingValue: missing.reduce((n, c) => n + Math.max(c.loss, 0), 0),
+      matchedLoss: missing
+        .filter((c) => c.financial === 'Financial Loss Detected')
+        .reduce((n, c) => n + Math.max(c.loss, 0), 0),
+      pendingValue: missing
+        .filter((c) => c.financial === 'Payment Match Pending')
+        .reduce((n, c) => n + Math.max(c.order_total, 0), 0),
+      raisedValue: raised.reduce((n, c) => n + c.claim_amount_requested, 0),
+      approvedValue: rows.reduce((n, c) => n + c.claim_amount_approved, 0),
+      paidValue: rows
+        .filter((c) => c.user_claim_status === 'Paid')
+        .reduce((n, c) => n + c.recovered, 0),
+      packetMatches: matchRows('Packet ID'),
+      sellerMatches: matchRows('Seller Order ID'),
+      lineMatches: matchRows('Order Line ID'),
+      pendingMatches: matchRows('Pending'),
+      exceptions: (summary?.unknown ?? 0) + imports.filter((i) => i.status === 'failed').length
+    };
+  });
   const currentYear = new Intl.DateTimeFormat('en', {
     year: 'numeric',
     timeZone: 'Asia/Kolkata'
@@ -580,6 +656,7 @@
   }
   async function openDashboardPreview(kind: string) {
     const p = new URLSearchParams({ page: '1', limit: '100' });
+    p.set('marketplace', marketplace);
     if (month) p.set('month', month);
     if (year) p.set('year', year);
     if (kind === 'Received') p.set('receipt', 'Received');
@@ -592,6 +669,28 @@
       p.set('receipt', 'Not Received');
       p.set('financial', 'Not Debited');
     }
+    const filterMyntraPreview = (source: Case[]) => {
+      if (marketplace !== 'myntra') return source;
+      if (kind === 'Return received')
+        return source.filter((c) => !isMyntraRTO(c) && c.receipt === 'Received');
+      if (kind === 'RTO received')
+        return source.filter((c) => isMyntraRTO(c) && c.receipt === 'Received');
+      if (kind === 'Return not received')
+        return source.filter((c) => !isMyntraRTO(c) && c.receipt === 'Not Received');
+      if (kind === 'RTO not received')
+        return source.filter((c) => isMyntraRTO(c) && c.receipt === 'Not Received');
+      if (kind === 'Pending payment match')
+        return source.filter((c) => c.financial === 'Payment Match Pending');
+      if (kind === 'Financial loss detected')
+        return source.filter((c) => c.financial === 'Financial Loss Detected');
+      if (kind === 'Ready to raise claim')
+        return source.filter(
+          (c) =>
+            c.claim_status === 'Raise Claim' &&
+            (c.user_claim_status || 'Not Raised') === 'Not Raised'
+        );
+      return source;
+    };
     try {
       if (browserMode) {
         let rows = [...(overview?.rows ?? [])];
@@ -605,6 +704,7 @@
           );
         if (kind === 'Not Debited')
           rows = rows.filter((c) => c.receipt === 'Not Received' && c.financial === 'Not Debited');
+        rows = filterMyntraPreview(rows);
         dashboardPreview = {
           title: kind === 'All returns' ? 'All returns' : kind,
           rows,
@@ -613,10 +713,11 @@
         return;
       }
       const r = await api<Results>('/results?' + p.toString());
+      const previewRows = filterMyntraPreview(r.rows);
       dashboardPreview = {
         title: kind === 'All returns' ? 'All returns' : kind,
-        rows: r.rows,
-        total: r.total
+        rows: previewRows,
+        total: marketplace === 'myntra' && kind !== 'All returns' ? previewRows.length : r.total
       };
     } catch (e) {
       error = (e as Error).message;
@@ -1019,212 +1120,386 @@
             >
           </div>{/if}
         {#if page === 'Overview'}
-          <div class="section-heading">
-            <h2>Returns at a glance</h2>
-            <span>{month ? monthLabel(month) : year || 'All imported periods'}</span>
-          </div>
-          <div class="metric-grid clickable-metrics">
-            {#each [{ label: 'Returns', value: summary?.total, icon: Package, color: 'gray', kind: 'All returns' }, { label: 'Received', value: summary?.received, icon: PackageCheck, color: 'blue', kind: 'Received' }, { label: 'Not received', value: summary?.not_received, icon: PackageX, color: 'red', kind: 'Not Received' }, { label: 'Debited', value: summary?.debited, icon: IndianRupee, color: 'red', kind: 'Debited' }, { label: 'Not debited', value: summary?.not_debited, icon: ShieldCheck, color: 'blue', kind: 'Not Debited' }] as m}<button
-                class="metric-card metric-button"
-                onclick={() => void openDashboardPreview(m.kind)}
-              >
-                <div class="metric-top">
-                  <span>{m.label}</span>
-                  <div class="metric-icon {m.color}"><m.icon size={18} /></div>
-                </div>
-                <strong>{number(m.value)}</strong><span class="view-link"
-                  >Preview rows <ArrowUpRight size={13} /></span
+          {#if marketplace === 'myntra'}
+            <div class="section-heading myntra-heading">
+              <div>
+                <h2>Myntra operations overview</h2>
+                <p>Return, RTO, payment and SPF claim verification</p>
+              </div>
+              <span>{month ? monthLabel(month) : year || 'All imported periods'}</span>
+            </div>
+            <div class="myntra-kpi-grid">
+              {#each [['Total website lines', myntraDashboard.total, 'All returns', 'neutral'], ['Return received', myntraDashboard.returnReceived, 'Return received', 'blue'], ['RTO received', myntraDashboard.rtoReceived, 'RTO received', 'blue'], ['Return not received', myntraDashboard.returnMissing, 'Return not received', 'red'], ['RTO not received', myntraDashboard.rtoMissing, 'RTO not received', 'red'], ['Pending payment match', myntraDashboard.paymentPending, 'Pending payment match', 'warning'], ['Financial loss detected', myntraDashboard.lossDetected, 'Financial loss detected', 'red'], ['Ready to raise claim', myntraDashboard.ready, 'Ready to raise claim', 'red']] as k}<button
+                  class="myntra-kpi {k[3]}"
+                  onclick={() => void openDashboardPreview(String(k[2]))}
                 >
-              </button>{/each}
-          </div>
-          <div class="dashboard-middle">
-            <section class="panel returns-chart">
+                  <span>{k[0]}</span><strong>{number(k[1] as number)}</strong><small
+                    >Preview rows <ArrowUpRight size={12} /></small
+                  >
+                </button>{/each}
+            </div>
+
+            <section class="panel myntra-section">
               <div class="panel-heading">
                 <div>
-                  <h2>Returns over time</h2>
-                  <p>Physical receipt against reported returns</p>
+                  <h2>Claim priority</h2>
+                  <p>Daily SPF claim work queue</p>
+                </div>
+              </div>
+              <div class="myntra-claim-grid">
+                {#each [['Waiting for claim window', myntraDashboard.waiting, 'neutral'], ['Ready to raise', myntraDashboard.ready, 'danger'], ['Expiring in 7 days', myntraDashboard.expiring, 'urgent'], ['Raised', myntraDashboard.raised, 'blue'], ['Under review', myntraDashboard.underReview, 'blue'], ['Approved', myntraDashboard.approved, 'success'], ['Rejected', myntraDashboard.rejected, 'danger'], ['Paid', myntraDashboard.paid, 'success'], ['Expired', myntraDashboard.expired, 'danger']] as q}<button
+                    class={String(q[2])}
+                    onclick={() => navigate('Claims')}
+                    ><strong>{number(q[1] as number)}</strong><span>{q[0]}</span></button
+                  >{/each}
+              </div>
+            </section>
+
+            <section class="panel table-panel myntra-section">
+              <div class="panel-heading">
+                <div>
+                  <h2>Claim deadlines</h2>
+                  <p>Lowest days remaining first</p>
+                </div>
+                <button class="text-button" onclick={() => navigate('Claims')}
+                  >Open Claim Center <ArrowRight size={14} /></button
+                >
+              </div>
+              <div class="table-scroll">
+                <table>
+                  <thead
+                    ><tr
+                      ><th>Order / SKU</th><th>Type</th><th>Loss</th><th>Claim opens</th><th
+                        >Claim closes</th
+                      ><th>Days left</th><th>Status</th><th></th></tr
+                    ></thead
+                  >
+                  <tbody
+                    >{#each myntraDashboard.deadlineRows as c}<tr
+                        ><td
+                          ><strong class="order-id">{c.order_id}</strong><small>{c.sku}</small></td
+                        ><td>{myntraCaseType(c)}</td><td class:loss-text={c.loss > 0}
+                          >{money(c.loss)}</td
+                        ><td>{date(c.claim_open)}</td><td>{date(c.claim_deadline)}</td><td
+                          ><span
+                            class="pill {claimDaysLeft(c) !== null && claimDaysLeft(c)! <= 7
+                              ? 'danger'
+                              : 'neutral'}">{claimDaysLeft(c)}</span
+                          ></td
+                        ><td><span class="pill {tone(c.claim_status)}">{c.claim_status}</span></td
+                        ><td
+                          ><button
+                            class="icon-button"
+                            aria-label={'View case ' + c.order_id}
+                            onclick={() => void detail(c)}><ArrowUpRight size={16} /></button
+                          ></td
+                        ></tr
+                      >{:else}<tr
+                        ><td colspan="8" class="empty-cell"
+                          >No claim deadlines are available for the selected period.</td
+                        ></tr
+                      >{/each}</tbody
+                  >
+                </table>
+              </div>
+            </section>
+
+            <div class="myntra-two-column">
+              <section class="panel myntra-section">
+                <div class="panel-heading">
+                  <div>
+                    <h2>Return verification summary</h2>
+                    <p>Return and RTO are classified separately</p>
+                  </div>
+                </div>
+                <div class="verification-grid">
+                  {#each [['Return received', myntraDashboard.returnReceived, 'blue'], ['Return not received', myntraDashboard.returnMissing, 'red'], ['RTO received', myntraDashboard.rtoReceived, 'blue'], ['RTO not received', myntraDashboard.rtoMissing, 'red']] as v}<div
+                      class={String(v[2])}
+                    >
+                      <span>{v[0]}</span><strong>{number(v[1] as number)}</strong>
+                    </div>{/each}
+                </div>
+              </section>
+              <section class="panel myntra-section">
+                <div class="panel-heading">
+                  <div>
+                    <h2>Financial exposure</h2>
+                    <p>Money currently at risk and claim recovery</p>
+                  </div>
+                </div>
+                <div class="verification-grid money">
+                  {#each [['Missing return value', myntraDashboard.missingValue, 'red'], ['Payment-matched loss', myntraDashboard.matchedLoss, 'red'], ['Pending payment verification', myntraDashboard.pendingValue, 'warning'], ['Claims raised', myntraDashboard.raisedValue, 'blue'], ['Claims approved', myntraDashboard.approvedValue, 'blue'], ['Claim amount paid', myntraDashboard.paidValue, 'success']] as v}<div
+                      class={String(v[2])}
+                    >
+                      <span>{v[0]}</span><strong>{money(v[1] as number)}</strong>
+                    </div>{/each}
+                </div>
+              </section>
+            </div>
+
+            <div class="myntra-two-column">
+              <section class="panel table-panel myntra-section">
+                <div class="panel-heading">
+                  <div>
+                    <h2>Payment verification</h2>
+                    <p>Packet ID first, then Seller Order ID, then Order Line ID</p>
+                  </div>
+                </div>
+                <div class="table-scroll">
+                  <table>
+                    <thead><tr><th>Match status</th><th>Count</th><th>Loss amount</th></tr></thead
+                    ><tbody
+                      >{#each [['Packet ID match', myntraDashboard.packetMatches], ['Seller Order ID match', myntraDashboard.sellerMatches], ['Order Line ID match', myntraDashboard.lineMatches], ['Pending payment match', myntraDashboard.pendingMatches]] as p}<tr
+                          ><td>{p[0]}</td><td>{number((p[1] as Case[]).length)}</td><td
+                            >{money((p[1] as Case[]).reduce((n, c) => n + c.loss, 0))}</td
+                          ></tr
+                        >{/each}</tbody
+                    >
+                  </table>
+                </div>
+              </section>
+              <section class="panel table-panel myntra-section">
+                <div class="panel-heading">
+                  <div>
+                    <h2>Data upload health</h2>
+                    <p>Latest source files and validation status</p>
+                  </div>
+                  <span class="pill {myntraDashboard.exceptions ? 'danger' : 'success'}"
+                    >{number(myntraDashboard.exceptions)} exceptions</span
+                  >
+                </div>
+                <div class="table-scroll">
+                  <table>
+                    <thead
+                      ><tr><th>Source</th><th>Last upload</th><th>Rows</th><th>Status</th></tr
+                      ></thead
+                    ><tbody
+                      >{#each cards as card}{@const latest = imports
+                          .filter((i) => i.kind === card.kind)
+                          .sort((a, b) => b.created_at.localeCompare(a.created_at))[0]}<tr
+                          ><td>{card.title}</td><td>{latest ? date(latest.created_at) : '—'}</td><td
+                            >{number(latest?.rows)}</td
+                          ><td
+                            ><span class="pill {tone(latest?.status || 'Awaiting')}"
+                              >{latest?.status || 'Awaiting'}</span
+                            ></td
+                          ></tr
+                        >{/each}</tbody
+                    >
+                  </table>
+                </div>
+              </section>
+            </div>
+          {:else}
+            <div class="section-heading">
+              <h2>Returns at a glance</h2>
+              <span>{month ? monthLabel(month) : year || 'All imported periods'}</span>
+            </div>
+            <div class="metric-grid clickable-metrics">
+              {#each [{ label: 'Returns', value: summary?.total, icon: Package, color: 'gray', kind: 'All returns' }, { label: 'Received', value: summary?.received, icon: PackageCheck, color: 'blue', kind: 'Received' }, { label: 'Not received', value: summary?.not_received, icon: PackageX, color: 'red', kind: 'Not Received' }, { label: 'Debited', value: summary?.debited, icon: IndianRupee, color: 'red', kind: 'Debited' }, { label: 'Not debited', value: summary?.not_debited, icon: ShieldCheck, color: 'blue', kind: 'Not Debited' }] as m}<button
+                  class="metric-card metric-button"
+                  onclick={() => void openDashboardPreview(m.kind)}
+                >
+                  <div class="metric-top">
+                    <span>{m.label}</span>
+                    <div class="metric-icon {m.color}"><m.icon size={18} /></div>
+                  </div>
+                  <strong>{number(m.value)}</strong><span class="view-link"
+                    >Preview rows <ArrowUpRight size={13} /></span
+                  >
+                </button>{/each}
+            </div>
+            <div class="dashboard-middle">
+              <section class="panel returns-chart">
+                <div class="panel-heading">
+                  <div>
+                    <h2>Returns over time</h2>
+                    <p>Physical receipt against reported returns</p>
+                  </div>
+                  <div class="legend">
+                    <span><i class="green-bg"></i>Received</span><span
+                      ><i class="orange-bg"></i>Not received</span
+                    >
+                  </div>
+                </div>
+                {#if months.length}<div class="chart">
+                    {#each months.slice(-12) as m}{@const s =
+                        overview!.monthly[m]}{@const maxTotal = Math.max(
+                        ...months.map((k) => overview!.monthly[k].total),
+                        1
+                      )}
+                      <div class="chart-column">
+                        <div class="bar-label">{s.total}</div>
+                        <div class="bar-space">
+                          <div class="bar" style:height={`${(s.total / maxTotal) * 100}%`}>
+                            <div
+                              class="orange-bg"
+                              style:height={`${(s.not_received / s.total) * 100}%`}
+                            ></div>
+                            <div
+                              class="green-bg"
+                              style:height={`${(s.received / s.total) * 100}%`}
+                            ></div>
+                          </div>
+                        </div>
+                        <span>{monthLabel(m).split(' ')[0]}</span>
+                      </div>{/each}
+                  </div>{:else}<div class="empty-chart">
+                    <Layers size={29} />
+                    <h3>Your returns story starts here</h3>
+                    <p>Import your {marketplaceName()} files to see your monthly picture.</p>
+                    <button class="text-button" onclick={() => navigate('Data imports')}
+                      >Upload your first files <ArrowRight size={15} /></button
+                    >
+                  </div>{/if}
+                <div class="chart-footer actions-only">
+                  <button class="text-button" onclick={() => navigate('Reports')}
+                    >View reports <ArrowUpRight size={14} /></button
+                  >
+                </div>
+              </section>
+              <section class="financial-panel">
+                <div class="eyebrow">FINANCIAL SUMMARY</div>
+                <h2>Exact financial position.</h2>
+                <div class="finance-card-grid">
+                  <button onclick={() => void openDashboardPreview('Debited')}
+                    ><span>Total refund</span><strong>{money(summary?.refund_debited)}</strong
+                    ><small>Buyer refund debited</small></button
+                  >
+                  <button onclick={() => void openDashboardPreview('Debited')}
+                    ><span>Recovered</span><strong class="recovered"
+                      >{money(summary?.recovered)}</strong
+                    ><small
+                      >{marketplace === 'amazon'
+                        ? 'Product reimbursement received'
+                        : 'SPF reimbursement received'}</small
+                    ></button
+                  >
+                  <button onclick={() => void openDashboardPreview('Debited')}
+                    ><span>Current product loss</span><strong class="loss-text"
+                      >{money(summary?.loss)}</strong
+                    ><small>Still unrecovered</small></button
+                  >
+                  <button onclick={() => void openDashboardPreview('Not Debited')}
+                    ><span>No-loss cases</span><strong>{number(summary?.no_loss_cases)}</strong
+                    ><small>Not debited or fully reimbursed</small></button
+                  >
+                </div>
+                <div class="finance-rows">
+                  <div>
+                    <span
+                      >{marketplace === 'amazon'
+                        ? 'Fulfilment fee refunds'
+                        : 'Flipkart fee refunds'}</span
+                    ><b>{money(summary?.fee_refund)}</b>
+                  </div>
+                </div>
+              </section>
+            </div>
+            <section class="panel financial-trend">
+              <div class="panel-heading">
+                <div>
+                  <h2>Monthly financial loss</h2>
+                  <p>Current product loss compared with actual product recovery</p>
                 </div>
                 <div class="legend">
-                  <span><i class="green-bg"></i>Received</span><span
-                    ><i class="orange-bg"></i>Not received</span
+                  <span><i class="red-bg"></i>Loss</span><span
+                    ><i class="green-bg"></i>Recovered</span
                   >
                 </div>
               </div>
-              {#if months.length}<div class="chart">
-                  {#each months.slice(-12) as m}{@const s = overview!.monthly[m]}{@const maxTotal =
-                      Math.max(...months.map((k) => overview!.monthly[k].total), 1)}
-                    <div class="chart-column">
-                      <div class="bar-label">{s.total}</div>
-                      <div class="bar-space">
-                        <div class="bar" style:height={`${(s.total / maxTotal) * 100}%`}>
-                          <div
-                            class="orange-bg"
-                            style:height={`${(s.not_received / s.total) * 100}%`}
-                          ></div>
-                          <div
-                            class="green-bg"
-                            style:height={`${(s.received / s.total) * 100}%`}
-                          ></div>
-                        </div>
+              {#if months.length}<div class="money-chart">
+                  {#each months.slice(-12) as m}{@const ms = overview!.monthly[m]}{@const maxMoney =
+                      Math.max(
+                        ...months.map((k) =>
+                          Math.max(overview!.monthly[k].loss, overview!.monthly[k].recovered)
+                        ),
+                        1
+                      )}
+                    <div class="money-column">
+                      <div class="money-bars">
+                        <div
+                          class="money-bar loss-bar"
+                          style:height={`${(ms.loss / maxMoney) * 100}%`}
+                          title={'Loss ' + money(ms.loss)}
+                        ></div>
+                        <div
+                          class="money-bar recovery-bar"
+                          style:height={`${(ms.recovered / maxMoney) * 100}%`}
+                          title={'Recovered ' + money(ms.recovered)}
+                        ></div>
                       </div>
-                      <span>{monthLabel(m).split(' ')[0]}</span>
-                    </div>{/each}
-                </div>{:else}<div class="empty-chart">
-                  <Layers size={29} />
-                  <h3>Your returns story starts here</h3>
-                  <p>Import your {marketplaceName()} files to see your monthly picture.</p>
-                  <button class="text-button" onclick={() => navigate('Data imports')}
-                    >Upload your first files <ArrowRight size={15} /></button
-                  >
-                </div>{/if}
-              <div class="chart-footer actions-only">
-                <button class="text-button" onclick={() => navigate('Reports')}
-                  >View reports <ArrowUpRight size={14} /></button
-                >
-              </div>
-            </section>
-            <section class="financial-panel">
-              <div class="eyebrow">FINANCIAL SUMMARY</div>
-              <h2>Exact financial position.</h2>
-              <div class="finance-card-grid">
-                <button onclick={() => void openDashboardPreview('Debited')}
-                  ><span>Total refund</span><strong>{money(summary?.refund_debited)}</strong><small
-                    >Buyer refund debited</small
-                  ></button
-                >
-                <button onclick={() => void openDashboardPreview('Debited')}
-                  ><span>Recovered</span><strong class="recovered"
-                    >{money(summary?.recovered)}</strong
-                  ><small
-                    >{marketplace === 'amazon'
-                      ? 'Product reimbursement received'
-                      : 'SPF reimbursement received'}</small
-                  ></button
-                >
-                <button onclick={() => void openDashboardPreview('Debited')}
-                  ><span>Current product loss</span><strong class="loss-text"
-                    >{money(summary?.loss)}</strong
-                  ><small>Still unrecovered</small></button
-                >
-                <button onclick={() => void openDashboardPreview('Not Debited')}
-                  ><span>No-loss cases</span><strong>{number(summary?.no_loss_cases)}</strong><small
-                    >Not debited or fully reimbursed</small
-                  ></button
-                >
-              </div>
-              <div class="finance-rows">
-                <div>
-                  <span
-                    >{marketplace === 'amazon'
-                      ? 'Fulfilment fee refunds'
-                      : 'Flipkart fee refunds'}</span
-                  ><b>{money(summary?.fee_refund)}</b>
-                </div>
-              </div>
-            </section>
-          </div>
-          <section class="panel financial-trend">
-            <div class="panel-heading">
-              <div>
-                <h2>Monthly financial loss</h2>
-                <p>Current product loss compared with actual product recovery</p>
-              </div>
-              <div class="legend">
-                <span><i class="red-bg"></i>Loss</span><span><i class="green-bg"></i>Recovered</span
-                >
-              </div>
-            </div>
-            {#if months.length}<div class="money-chart">
-                {#each months.slice(-12) as m}{@const ms = overview!.monthly[m]}{@const maxMoney =
-                    Math.max(
-                      ...months.map((k) =>
-                        Math.max(overview!.monthly[k].loss, overview!.monthly[k].recovered)
-                      ),
-                      1
-                    )}
-                  <div class="money-column">
-                    <div class="money-bars">
-                      <div
-                        class="money-bar loss-bar"
-                        style:height={`${(ms.loss / maxMoney) * 100}%`}
-                        title={'Loss ' + money(ms.loss)}
-                      ></div>
-                      <div
-                        class="money-bar recovery-bar"
-                        style:height={`${(ms.recovered / maxMoney) * 100}%`}
-                        title={'Recovered ' + money(ms.recovered)}
-                      ></div>
+                      <span>{monthLabel(m).split(' ')[0]}</span><small>{money(ms.loss)}</small>
                     </div>
-                    <span>{monthLabel(m).split(' ')[0]}</span><small>{money(ms.loss)}</small>
-                  </div>
-                {/each}
-              </div>{:else}<div class="empty-chart">
-                <IndianRupee size={28} />
-                <h3>No financial trend yet</h3>
-                <p>Import payment data to see loss and recovery by month.</p>
-              </div>{/if}
-          </section>
-          <div class="lower-grid">
-            <section class="panel claims-overview">
-              <div class="panel-heading">
-                <div>
-                  <h2>A little attention. A lot recovered.</h2>
-                  <p>Your claims worklist, ready when you are.</p>
-                </div>
-                <div class="metric-icon red"><ShieldCheck size={20} /></div>
-              </div>
-              <div class="claim-metrics expanded-claims">
-                {#each [['Raise Claim', summary?.raise, 'Ready to claim', 'red-bg'], ['Scheduled', summary?.scheduled, 'Scheduled', 'blue-bg'], ['Pending', summary?.claim_pending, 'Submitted · pending', 'blue-bg'], ['Approved', summary?.claim_approved, 'Approved', 'blue-bg'], ['Rejected', summary?.claim_rejected, 'Rejected', 'red-bg'], ['Expired', summary?.expired, 'Expired · not raised', 'red-bg']] as q}<button
-                    onclick={() => {
-                      navigate('Claims');
-                      claim = String(q[0]);
-                      void load();
-                    }}
-                  >
-                    <strong>{number(q[1] as number)}</strong><span
-                      ><i class={'dot ' + q[3]}></i>{q[2]}</span
-                    >
-                  </button>{/each}
-              </div>
-              <div class="panel-footer actions-only">
-                <button class="text-button" onclick={() => navigate('Claims')}
-                  >Open claims <ArrowRight size={15} /></button
-                >
-              </div>
+                  {/each}
+                </div>{:else}<div class="empty-chart">
+                  <IndianRupee size={28} />
+                  <h3>No financial trend yet</h3>
+                  <p>Import payment data to see loss and recovery by month.</p>
+                </div>{/if}
             </section>
-            <section class="panel data-health">
-              <div class="panel-heading">
-                <div>
-                  <h2>Your data sources</h2>
-                  <p>Three files. One complete picture.</p>
-                </div>
-                <button
-                  class="icon-button"
-                  aria-label="Manage data sources"
-                  onclick={() => navigate('Data imports')}><ArrowUpRight size={18} /></button
-                >
-              </div>
-              {#each cards as c}{@const i = imports.find(
-                  (i) => i.kind === c.kind && i.active && i.status === 'completed'
-                )}
-                <div class="source-row">
-                  <div class="source-icon {c.color}"><c.icon size={17} /></div>
+            <div class="lower-grid">
+              <section class="panel claims-overview">
+                <div class="panel-heading">
                   <div>
-                    <strong>{c.title}</strong><small
-                      >{i ? i.filename : 'No file imported yet'}</small
-                    >
+                    <h2>A little attention. A lot recovered.</h2>
+                    <p>Your claims worklist, ready when you are.</p>
                   </div>
-                  <span class="pill {i ? 'success' : 'neutral'}">{i ? 'Ready' : 'Awaiting'}</span>
-                </div>{/each}
-            </section>
-          </div>
-          {#if summary?.unknown}<div class="alert notice">
-              <AlertCircle size={17} />{number(summary.unknown)} cases need payment data or allocation
-              review. They are kept separate from “Not Debited”.<button
-                class="text-button"
-                onclick={() => navigate('Reports')}>Review <ArrowRight size={14} /></button
-              >
-            </div>{/if}
+                  <div class="metric-icon red"><ShieldCheck size={20} /></div>
+                </div>
+                <div class="claim-metrics expanded-claims">
+                  {#each [['Raise Claim', summary?.raise, 'Ready to claim', 'red-bg'], ['Scheduled', summary?.scheduled, 'Scheduled', 'blue-bg'], ['Pending', summary?.claim_pending, 'Submitted · pending', 'blue-bg'], ['Approved', summary?.claim_approved, 'Approved', 'blue-bg'], ['Rejected', summary?.claim_rejected, 'Rejected', 'red-bg'], ['Expired', summary?.expired, 'Expired · not raised', 'red-bg']] as q}<button
+                      onclick={() => {
+                        navigate('Claims');
+                        claim = String(q[0]);
+                        void load();
+                      }}
+                    >
+                      <strong>{number(q[1] as number)}</strong><span
+                        ><i class={'dot ' + q[3]}></i>{q[2]}</span
+                      >
+                    </button>{/each}
+                </div>
+                <div class="panel-footer actions-only">
+                  <button class="text-button" onclick={() => navigate('Claims')}
+                    >Open claims <ArrowRight size={15} /></button
+                  >
+                </div>
+              </section>
+              <section class="panel data-health">
+                <div class="panel-heading">
+                  <div>
+                    <h2>Your data sources</h2>
+                    <p>Three files. One complete picture.</p>
+                  </div>
+                  <button
+                    class="icon-button"
+                    aria-label="Manage data sources"
+                    onclick={() => navigate('Data imports')}><ArrowUpRight size={18} /></button
+                  >
+                </div>
+                {#each cards as c}{@const i = imports.find(
+                    (i) => i.kind === c.kind && i.active && i.status === 'completed'
+                  )}
+                  <div class="source-row">
+                    <div class="source-icon {c.color}"><c.icon size={17} /></div>
+                    <div>
+                      <strong>{c.title}</strong><small
+                        >{i ? i.filename : 'No file imported yet'}</small
+                      >
+                    </div>
+                    <span class="pill {i ? 'success' : 'neutral'}">{i ? 'Ready' : 'Awaiting'}</span>
+                  </div>{/each}
+              </section>
+            </div>
+            {#if summary?.unknown}<div class="alert notice">
+                <AlertCircle size={17} />{number(summary.unknown)} cases need payment data or allocation
+                review. They are kept separate from “Not Debited”.<button
+                  class="text-button"
+                  onclick={() => navigate('Reports')}>Review <ArrowRight size={14} /></button
+                >
+              </div>{/if}
+          {/if}
         {:else if page === 'Data imports'}
           <section class="upload-intro">
             <div>
@@ -1351,7 +1626,7 @@
                   void load();
                 }}
                 ><option value="">All return statuses</option
-                >{#each ['Return Initiated', 'Returned to Seller', 'Delivered to Seller', 'In-transit to Seller Flex Node', 'Customer Rescheduled Pick-up', 'Return Has Been Abandoned'] as st}<option
+                >{#each marketplace === 'myntra' ? myntraReturnStatuses : ['Return Initiated', 'Returned to Seller', 'Delivered to Seller', 'In-transit to Seller Flex Node', 'Customer Rescheduled Pick-up', 'Return Has Been Abandoned'] as st}<option
                     >{st}</option
                   >{/each}</select
               ><select
@@ -1394,6 +1669,68 @@
                       >{:else}<tr
                         ><td colspan="9" class="empty-cell"
                           >Import your files to see the monthly summary.</td
+                        ></tr
+                      >{/each}</tbody
+                  >
+                </table>
+              </div>{:else if marketplace === 'myntra'}<div class="table-scroll">
+                <table class="myntra-report-table">
+                  <thead
+                    ><tr
+                      ><th>Order / SKU</th><th>Type</th><th>Period</th><th>Return status</th><th
+                        >Physical verification</th
+                      ><th>Payment match</th><th>Payment status</th><th>Financial loss</th><th
+                        >Claim opens</th
+                      ><th>Claim closes</th><th>Days left</th><th>System status</th><th
+                        >Claim status</th
+                      ><th></th></tr
+                    ></thead
+                  >
+                  <tbody
+                    >{#each results?.rows ?? [] as c}<tr
+                        ><td
+                          ><strong class="order-id">{c.order_id}</strong><small>{c.sku}</small></td
+                        ><td><span class="pill neutral">{myntraCaseType(c)}</span></td><td
+                          >{monthLabel(c.month)}</td
+                        ><td class="status-text">{c.status || 'Not found'}</td><td
+                          ><span class="pill {tone(c.receipt)}">{c.receipt}</span
+                          >{#if c.received_month}<small>{monthLabel(c.received_month)}</small
+                            >{/if}</td
+                        ><td>{paymentMatch(c)}</td><td
+                          ><span class="pill {tone(c.financial)}">{c.financial}</span></td
+                        ><td class:loss-text={c.loss > 0}>{money(c.loss)}</td><td
+                          >{date(c.claim_open)}</td
+                        ><td>{date(c.claim_deadline)}</td><td
+                          ><span
+                            class="pill {claimDaysLeft(c) !== null && claimDaysLeft(c)! <= 7
+                              ? 'danger'
+                              : 'neutral'}">{claimDaysLeft(c) ?? '—'}</span
+                          ></td
+                        ><td><span class="pill {tone(c.claim_status)}">{c.claim_status}</span></td
+                        ><td
+                          ><span class="pill {tone(c.user_claim_status || 'Not Raised')}"
+                            >{c.user_claim_status || 'Not Raised'}</span
+                          ></td
+                        ><td
+                          ><button
+                            class="icon-button"
+                            aria-label={'View case ' + c.order_id}
+                            onclick={() => void detail(c)}><ArrowUpRight size={17} /></button
+                          ></td
+                        ></tr
+                      >{:else}<tr
+                        ><td colspan="14" class="empty-cell"
+                          ><Package size={30} />
+                          <h3>
+                            {imports.length
+                              ? 'No cases match these filters'
+                              : 'No returns imported yet'}
+                          </h3>
+                          <p>
+                            {imports.length
+                              ? 'Change the period or status to find your cases.'
+                              : 'Upload your Myntra data to start reconciling.'}
+                          </p></td
                         ></tr
                       >{/each}</tbody
                   >
