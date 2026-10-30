@@ -65,7 +65,7 @@ func reconcileMyntra(rows []Row, now time.Time) ([]Result, error) {
 		if base.IsZero() { base = latest.Updated }
 		result := Result{Marketplace:"myntra", Key:key, OrderID:latest.OrderID, SKU:latest.SKU, Month:Month(base), Status:latest.Status, ReturnDate:base, Updated:latest.Updated, Receipt:"Not Received", Financial:"Payment Match Pending", ClaimStatus:"Review", RuleVersion:MyntraRuleVersion, Evidence:append([]Row{}, events...), Notes:[]string{}}
 		received := physicalByLine[Normalize(latest.OrderLineID)]
-		if len(received)==0 { received = physicalByProduct[Key(latest.OrderID, latest.SKU)] }
+		if latest.OrderLineID == "" { received = physicalByProduct[Key(latest.OrderID, latest.SKU)] }
 		if len(received)>0 {
 			result.Receipt="Received"; result.Delivered=received[0].Date; result.ReceivedMonth=Month(received[0].Date); result.Financial="Not Investigated — Received"; result.Evidence=append(result.Evidence, received...); result.ClaimStatus="No Claim"
 			classification := Normalize(latest.Status+" "+latest.Reason)

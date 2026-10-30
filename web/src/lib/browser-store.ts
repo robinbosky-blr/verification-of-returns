@@ -1389,10 +1389,9 @@ function reconcileMyntraBrowser(state: BrowserState): Case[] {
     const base = isRto
       ? rawDate(latest, 'order_rto_date', 'rto_creation_date') || latest.date
       : latest.date;
-    const receivedRows =
-      (latest.order_line_id ? physicalByLine.get(normalize(latest.order_line_id)) : undefined) ??
-      physicalByProduct.get(keyOf(latest.order_id, latest.sku)) ??
-      [];
+    const receivedRows = latest.order_line_id
+      ? (physicalByLine.get(normalize(latest.order_line_id)) ?? [])
+      : (physicalByProduct.get(keyOf(latest.order_id, latest.sku)) ?? []);
     const received = receivedRows.length > 0;
     const result: Case = {
       key,
