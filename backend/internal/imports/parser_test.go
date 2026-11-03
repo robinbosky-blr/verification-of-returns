@@ -94,6 +94,16 @@ func TestAmazonSlashNamedMonthDateAndMissingStatus(t *testing.T) {
 		t.Fatal(rows, e)
 	}
 }
+
+func TestAmazonSeptemberTimestampConvertsToISOTime(t *testing.T) {
+	got, e := ParseDate("1 Sept 2026 12:16:40 am")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if iso := got.Format(time.RFC3339); iso != "2026-09-01T00:16:40+05:30" {
+		t.Fatalf("unexpected ISO timestamp %q", iso)
+	}
+}
 func TestXLSXMonthAndSheets(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "p.xlsx")
 	f := excelize.NewFile()

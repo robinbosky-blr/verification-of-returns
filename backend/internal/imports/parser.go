@@ -24,6 +24,7 @@ type Stats struct {
 }
 
 var headerNoise = regexp.MustCompile(`[^a-z0-9]`)
+var amazonSept = regexp.MustCompile(`(?i)\bsept\b`)
 
 func header(s string) string {
 	return headerNoise.ReplaceAllString(strings.ToLower(strings.TrimPrefix(s, "\ufeff")), "")
@@ -223,6 +224,9 @@ func ParseDate(s string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("date is missing")
 	}
 	s = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(s, " IST"), " UTC"), " GMT+05:30")
+	// Amazon exports September as "Sept" in some transaction rows, while
+	// Go's reference month abbreviation is "Sep". Normalize it before parsing.
+	s = amazonSept.ReplaceAllString(s, "Sep")
 	for _, f := range []string{time.RFC3339, "2006-01-02 15:04:05-07:00", "2006-01-02 15:04:05", "2006-01-02", "02-Jan-2006", "2-Jan-2006", "02/Jan/2006", "2/Jan/2006", "02/Jan/06", "2/Jan/06", "2 January, 2006", "02 January, 2006", "2 Jan, 2006", "02 Jan, 2006", "02 Jan 2006 15:04:05", "2 Jan 2006 15:04:05", "02-Jan-2006 15:04:05", "2 Jan 2006 3:04:05 PM", "2 Jan 2006 3:04:05 pm", "02/01/2006 15:04:05", "02/01/2006", "2/1/2006", "02.01.2006 15:04:05", "2.1.2006 15:04:05", "02.01.2006", "2.1.2006", "02-01-2006", "2-1-2006", "01/02/06", "Jan 2, 2006 3:04:05 PM"} {
 		if t, e := time.ParseInLocation(f, s, domain.IST); e == nil {
 			return t, nil
