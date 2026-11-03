@@ -3,6 +3,7 @@ package imports
 import (
 	"archive/zip"
 	"bufio"
+	"bytes"
 	"encoding/csv"
 	"fmt"
 	"io"
@@ -222,7 +223,7 @@ func ParseDate(s string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("date is missing")
 	}
 	s = strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(s, " IST"), " UTC"), " GMT+05:30")
-	for _, f := range []string{time.RFC3339, "2006-01-02 15:04:05-07:00", "2006-01-02 15:04:05", "2006-01-02", "02-Jan-2006", "2-Jan-2006", "2 January, 2006", "02 January, 2006", "2 Jan, 2006", "02 Jan, 2006", "02 Jan 2006 15:04:05", "2 Jan 2006 15:04:05", "02-Jan-2006 15:04:05", "2 Jan 2006 3:04:05 PM", "2 Jan 2006 3:04:05 pm", "02/01/2006 15:04:05", "02/01/2006", "2/1/2006", "02.01.2006 15:04:05", "2.1.2006 15:04:05", "02.01.2006", "2.1.2006", "02-01-2006", "2-1-2006", "01/02/06", "Jan 2, 2006 3:04:05 PM"} {
+	for _, f := range []string{time.RFC3339, "2006-01-02 15:04:05-07:00", "2006-01-02 15:04:05", "2006-01-02", "02-Jan-2006", "2-Jan-2006", "02/Jan/2006", "2/Jan/2006", "02/Jan/06", "2/Jan/06", "2 January, 2006", "02 January, 2006", "2 Jan, 2006", "02 Jan, 2006", "02 Jan 2006 15:04:05", "2 Jan 2006 15:04:05", "02-Jan-2006 15:04:05", "2 Jan 2006 3:04:05 PM", "2 Jan 2006 3:04:05 pm", "02/01/2006 15:04:05", "02/01/2006", "2/1/2006", "02.01.2006 15:04:05", "2.1.2006 15:04:05", "02.01.2006", "2.1.2006", "02-01-2006", "2-1-2006", "01/02/06", "Jan 2, 2006 3:04:05 PM"} {
 		if t, e := time.ParseInLocation(f, s, domain.IST); e == nil {
 			return t, nil
 		}
@@ -379,7 +380,7 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 					}
 				}
 				if r.Status == "" {
-					if strings.EqualFold(o.Marketplace, "flipkart") {
+					if strings.EqualFold(o.Marketplace, "flipkart") || strings.EqualFold(o.Marketplace, "amazon") || o.Marketplace == "" {
 						r.Status = "Return Status Not Found"
 					} else {
 						return fmt.Errorf("%s row %d: status missing", name, line)
@@ -503,6 +504,12 @@ func Parse(path string, o Options, emit func(domain.Row) error) (Stats, error) {
 	}
 	parseCSV := func(input io.Reader, name string) error {
 		b := bufio.NewReader(input)
+		// Amazon's Custom Unified Transaction report starts with a UTF-8 BOM
+		// immediately followed by a quoted metadata record. encoding/csv treats
+		// the quote as a bare quote unless the BOM is consumed first.
+		if prefix, _ := b.Peek(3); bytes.Equal(prefix, []byte{0xef, 0xbb, 0xbf}) {
+			_, _ = b.Discard(3)
+		}
 		peek, _ := b.Peek(4096)
 		r := csv.NewReader(b)
 		r.FieldsPerRecord = -1

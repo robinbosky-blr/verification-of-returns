@@ -68,6 +68,32 @@ func TestPaymentPreambleAndMoney(t *testing.T) {
 		t.Fatal(row, e)
 	}
 }
+
+func TestAmazonQuotedPaymentPreambleWithBOM(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "payment.csv")
+	content := "\ufeff\"Includes Amazon Marketplace, Fulfillment by Amazon (FBA), and Amazon Webstore transactions\"\n" +
+		"\"Other: For more details, see the \"\"Type\"\" and \"\"Description\"\" columns.\"\n" +
+		"\"date/time\",\"settlement id\",\"type\",\"order id\",\"Sku\",\"total\"\n" +
+		"\"31 Dec 2025 6:45:50 pm UTC\",\"26324648192\",\"Refund\",\"171-1\",\"SKU-1\",\"-2,055.38\"\n"
+	if e := os.WriteFile(p, []byte(content), 0600); e != nil { t.Fatal(e) }
+	var rows []domain.Row
+	_, e := Parse(p, Options{Marketplace: "amazon", Kind: "payment", Filename: "payment.csv"}, func(r domain.Row) error { rows = append(rows, r); return nil })
+	if e != nil || len(rows) != 1 || rows[0].OrderID != "171-1" || rows[0].SKU != "SKU-1" || rows[0].Amount != -205538 {
+		t.Fatal(rows, e)
+	}
+}
+
+func TestAmazonSlashNamedMonthDateAndMissingStatus(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "website.csv")
+	content := "Customer Order ID,mSKU,Pick -up date,Last Updated On,Return Status\n" +
+		"171-1,SKU-1,03/Jan/26,12/Jan/26,\n"
+	if e := os.WriteFile(p, []byte(content), 0600); e != nil { t.Fatal(e) }
+	var rows []domain.Row
+	_, e := Parse(p, Options{Marketplace: "amazon", Kind: "website", Filename: "website.csv"}, func(r domain.Row) error { rows = append(rows, r); return nil })
+	if e != nil || len(rows) != 1 || rows[0].Date.Day() != 3 || rows[0].Updated.Day() != 12 || rows[0].Status != "Return Status Not Found" {
+		t.Fatal(rows, e)
+	}
+}
 func TestXLSXMonthAndSheets(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "p.xlsx")
 	f := excelize.NewFile()
