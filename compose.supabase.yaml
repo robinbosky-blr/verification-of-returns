@@ -1,0 +1,35 @@
+name: returns-supabase-dev
+services:
+  api:
+    build: ./backend
+    restart: unless-stopped
+    command: [-mode, api]
+    env_file: .env.supabase
+    environment: &backend_env
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env.supabase}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env.supabase}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      SUPABASE_URL: ${SUPABASE_URL:?Set SUPABASE_URL in .env.supabase}
+      SUPABASE_SECRET_KEY: ${SUPABASE_SECRET_KEY:?Set SUPABASE_SECRET_KEY in .env.supabase}
+      SUPABASE_STORAGE_BUCKET: ${SUPABASE_STORAGE_BUCKET:-returns-originals}
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/api/health]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  worker:
+    build: ./backend
+    restart: unless-stopped
+    command: [-mode, worker]
+    env_file: .env.supabase
+    environment: *backend_env
+    depends_on:
+      api:
+        condition: service_healthy
+  web:
+    build: ./web
+    restart: unless-stopped
+    ports: ["127.0.0.1:${HTTP_PORT:-8088}:80"]
+    depends_on:
+      api:
+        condition: service_healthy

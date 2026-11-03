@@ -64,6 +64,10 @@ testdata/ synthetic fixtures
 
 The API and worker are separate processes from the same Go executable. Imports use PostgreSQL COPY in batches. SHA-256 protects duplicate uploads; canonical row fingerprints prevent overlapping snapshots from inflating counts. Successful import, reconciliation results and run audit publish in one transaction. A process crash releases the transaction lock and leaves the job queued for another worker attempt. An invalid file becomes failed with an actionable error.
 
+## Supabase development and testing
+
+ReturnScope can use a separate Supabase project for hosted development PostgreSQL and private original-file storage while retaining the Go API and worker. Copy `.env.supabase.example` to `.env.supabase`, fill the server-only values, and follow [docs/supabase-development.md](docs/supabase-development.md). Supabase credentials are not required for the normal local PostgreSQL Compose environment and must never be committed.
+
 ## Development and checks
 
 Requires Go 1.27.3, Node 24 and PostgreSQL 18 (CI uses 18.6).
