@@ -208,8 +208,7 @@ func (s Supabase) Materialize(ctx context.Context, key string) (string, func(), 
 }
 
 func (s Supabase) Delete(ctx context.Context, key string) error {
-	object, err := objectPath(key)
-	if err != nil {
+	if _, err := objectPath(key); err != nil {
 		return err
 	}
 	payload, err := json.Marshal(map[string][]string{"prefixes": []string{key}})
