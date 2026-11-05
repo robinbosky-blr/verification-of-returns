@@ -2581,6 +2581,11 @@ td {
   padding: 19px 22px;
   border-bottom: 1px solid #e8ece4;
 }
+.preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .preview-table {
   max-height: 68vh;
   overflow: auto;

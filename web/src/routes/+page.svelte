@@ -90,7 +90,12 @@
     claims: {},
     audit: []
   });
-  let dashboardPreview = $state<{ title: string; rows: Case[]; total: number } | null>(null);
+  let dashboardPreview = $state<{
+    title: string;
+    rows: Case[];
+    exportRows: Case[];
+    total: number;
+  } | null>(null);
   let claimForm = $state({
     status: 'Not Raised',
     raisedDate: '',
@@ -115,6 +120,37 @@
     'Debited',
     'Not Debited',
     'Reimbursed'
+  ];
+  const amazonReturnStatuses = [
+    'Return Initiated',
+    'Returned to Seller',
+    'Delivered to Seller',
+    'In-transit to Seller Flex Node',
+    'Customer Rescheduled Pick-up',
+    'Return Has Been Abandoned'
+  ];
+  const flipkartReturnStatuses = [
+    'Return Initiated',
+    'Carrier Out for Pick-up from Customer',
+    'Customer Rescheduled Pick-up',
+    'In-transit to Seller Flex Node',
+    'Out for Delivery',
+    'Return to Seller',
+    'Return Received',
+    'Return Has Been Abandoned',
+    'Cancelled Before Pickup',
+    'Return Lost',
+    'Do Not Expect Physical Delivery',
+    'Rejected by Seller',
+    'Yet to Receive'
+  ];
+  const flipkartPaymentStatuses = [
+    'Debited',
+    'Not Debited',
+    'Payment Not Found',
+    'Payment Window Incomplete',
+    'Payment Match Conflict',
+    'Manual Review'
   ];
   const amazonCards = [
     {
@@ -707,17 +743,31 @@
         rows = filterMyntraPreview(rows);
         dashboardPreview = {
           title: kind === 'All returns' ? 'All returns' : kind,
-          rows,
+          rows: rows.slice(0, 100),
+          exportRows: rows,
           total: rows.length
         };
         return;
       }
-      const r = await api<Results>('/results?' + p.toString());
-      const previewRows = filterMyntraPreview(r.rows);
+      const firstPage = await api<Results>('/results?' + p.toString());
+      const pageCount = Math.ceil(firstPage.total / 100);
+      const allRows = [...firstPage.rows];
+      for (let first = 2; first <= pageCount; first += 5) {
+        const batch = await Promise.all(
+          Array.from({ length: Math.min(5, pageCount - first + 1) }, (_, index) => {
+            const next = new URLSearchParams(p);
+            next.set('page', String(first + index));
+            return api<Results>('/results?' + next.toString());
+          })
+        );
+        allRows.push(...batch.flatMap((result) => result.rows));
+      }
+      const previewRows = filterMyntraPreview(allRows);
       dashboardPreview = {
         title: kind === 'All returns' ? 'All returns' : kind,
-        rows: previewRows,
-        total: marketplace === 'myntra' && kind !== 'All returns' ? previewRows.length : r.total
+        rows: previewRows.slice(0, 100),
+        exportRows: previewRows,
+        total: previewRows.length
       };
     } catch (e) {
       error = (e as Error).message;
@@ -798,7 +848,15 @@
     window.location.href = '/api/export?' + params() + '&format=' + format;
   }
   function exportBrowser(format: string) {
-    const rows = (results?.rows ?? []).map((c) => ({
+    exportRows(format, results?.rows ?? [], `returnscope-${marketplace}`);
+  }
+  function exportDashboardPreview(format: string) {
+    if (!dashboardPreview) return;
+    const title = dashboardPreview.title.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    exportRows(format, dashboardPreview.exportRows, `returnscope-${marketplace}-${title}`);
+  }
+  function exportRows(format: string, cases: Case[], filename: string) {
+    const rows = cases.map((c) => ({
       'Order ID': c.order_id,
       SKU: c.sku,
       Month: c.month,
@@ -835,14 +893,14 @@
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `returnscope-${marketplace}-${stamp}.csv`;
+      link.download = `${filename}-${stamp}.csv`;
       link.click();
       URL.revokeObjectURL(url);
       return;
     }
     const book = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(book, sheet, 'Return cases');
-    XLSX.writeFile(book, `returnscope-${marketplace}-${stamp}.xlsx`);
+    XLSX.writeFile(book, `${filename}-${stamp}.xlsx`);
   }
   function tone(s: string) {
     if (
@@ -1626,7 +1684,7 @@
                   void load();
                 }}
                 ><option value="">All return statuses</option
-                >{#each marketplace === 'myntra' ? myntraReturnStatuses : ['Return Initiated', 'Returned to Seller', 'Delivered to Seller', 'In-transit to Seller Flex Node', 'Customer Rescheduled Pick-up', 'Return Has Been Abandoned'] as st}<option
+                >{#each marketplace === 'myntra' ? myntraReturnStatuses : marketplace === 'flipkart' ? flipkartReturnStatuses : amazonReturnStatuses as st}<option
                     >{st}</option
                   >{/each}</select
               ><select
@@ -1637,7 +1695,7 @@
                   void load();
                 }}
                 ><option value="">All payment statuses</option
-                >{#each marketplace === 'flipkart' ? ['Debited', 'Not Debited', 'Already Reimbursed', 'Partially Reimbursed', 'Window Incomplete', 'Payment Not Found', 'Payment Review'] : marketplace === 'myntra' ? ['Financial Loss Detected', 'No Financial Debit Detected', 'Payment Match Pending'] : ['Debited', 'Not Debited', 'Already Reimbursed', 'Partially Reimbursed', 'Payment Data Missing', 'Payment Review'] as f}<option
+                >{#each marketplace === 'flipkart' ? flipkartPaymentStatuses : marketplace === 'myntra' ? ['Financial Loss Detected', 'No Financial Debit Detected', 'Payment Match Pending'] : ['Debited', 'Not Debited', 'Already Reimbursed', 'Partially Reimbursed', 'Payment Data Missing', 'Payment Review'] as f}<option
                     >{f}</option
                   >{/each}</select
               ><button class="secondary" onclick={() => exportFile('csv')}
@@ -1849,11 +1907,17 @@
               {number(dashboardPreview.total)} exact cases for the selected marketplace and period.
             </p>
           </div>
-          <button
-            class="icon-button"
-            aria-label="Close preview"
-            onclick={() => (dashboardPreview = null)}><X size={21} /></button
-          >
+          <div class="preview-actions">
+            <button class="secondary" onclick={() => exportDashboardPreview('csv')}
+              ><ArrowDownToLine size={15} />CSV</button
+            ><button class="secondary" onclick={() => exportDashboardPreview('xlsx')}
+              ><FileSpreadsheet size={15} />Excel</button
+            ><button
+              class="icon-button"
+              aria-label="Close preview"
+              onclick={() => (dashboardPreview = null)}><X size={21} /></button
+            >
+          </div>
         </div>
         <div class="table-scroll preview-table">
           <table>

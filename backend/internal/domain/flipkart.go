@@ -71,6 +71,7 @@ func reconcileFlipkart(rows []Row, now time.Time) ([]Result, error) {
 			Receipt: "Not Received", Financial: "Payment Not Found", ClaimStatus: "Review",
 			RuleVersion: FlipkartRuleVersion, Evidence: append([]Row{}, events...), Notes: []string{},
 		}
+		conflictingMatch := ambiguous[latest.OrderID] > 0
 		if count := ambiguous[latest.OrderID]; count > 0 { result.Notes = append(result.Notes, fmt.Sprintf("%d Flipkart row(s) need Order Item ID or SKU for allocation", count)) }
 		if received {
 			result.Receipt = "Received"
@@ -130,7 +131,7 @@ func reconcileFlipkart(rows []Row, now time.Time) ([]Result, error) {
 			}
 		}
 		if !windowComplete {
-			result.Financial = "Window Incomplete"
+			result.Financial = "Payment Window Incomplete"
 			result.Notes = append(result.Notes, fmt.Sprintf("Payment window requires %s and %s", caseMonth, nextMonth))
 		} else if len(tx) == 0 {
 			result.Financial = "Payment Not Found"
@@ -177,9 +178,13 @@ func reconcileFlipkart(rows []Row, now time.Time) ([]Result, error) {
 			result.ClaimStatus = "Review"
 		}
 		if unsupported {
-			result.Financial = "Payment Review"
+			result.Financial = "Manual Review"
 			result.ClaimStatus = "Review"
 			result.Notes = append(result.Notes, "Flipkart payment allocation requires review")
+		}
+		if conflictingMatch {
+			result.Financial = "Payment Match Conflict"
+			result.ClaimStatus = "Review"
 		}
 		out = append(out, result)
 	}

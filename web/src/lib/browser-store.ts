@@ -1233,7 +1233,8 @@ function reconcileFlipkartBrowser(state: BrowserState): Case[] {
       notes: [],
       evidence: [...ordered, ...receivedRows].map(evidence)
     };
-    if (ambiguous.get(latest.order_id))
+    const conflictingMatch = (ambiguous.get(latest.order_id) ?? 0) > 0;
+    if (conflictingMatch)
       result.notes.push(
         `${ambiguous.get(latest.order_id)} Flipkart row(s) need Order Item ID or SKU for allocation.`
       );
@@ -1299,7 +1300,7 @@ function reconcileFlipkartBrowser(state: BrowserState): Case[] {
       }
     }
     if (!windowComplete) {
-      result.financial = 'Window Incomplete';
+      result.financial = 'Payment Window Incomplete';
       result.notes.push(`Payment window requires ${caseMonth} and ${following}.`);
     } else if (!tx.length) result.financial = 'Payment Not Found';
     else if (!hasRefund || result.refund_total >= 0) {
@@ -1334,9 +1335,13 @@ function reconcileFlipkartBrowser(state: BrowserState): Case[] {
       result.claim_status = 'No Claim';
     else result.claim_status = 'Review';
     if (unsupported) {
-      result.financial = 'Payment Review';
+      result.financial = 'Manual Review';
       result.claim_status = 'Review';
       result.notes.push('Flipkart payment allocation requires review.');
+    }
+    if (conflictingMatch) {
+      result.financial = 'Payment Match Conflict';
+      result.claim_status = 'Review';
     }
     output.push(result);
   }

@@ -91,7 +91,7 @@ func TestFlipkartPaymentWindowMustBeComplete(t *testing.T) {
 	}
 	results, err := ReconcileMarketplace("flipkart", rows, flipkartDate("2026-09-01"))
 	if err != nil || len(results) != 1 { t.Fatal(results, err) }
-	if results[0].Financial != "Window Incomplete" || results[0].ClaimStatus != "Review" { t.Fatal(results[0]) }
+	if results[0].Financial != "Payment Window Incomplete" || results[0].ClaimStatus != "Review" { t.Fatal(results[0]) }
 }
 
 func TestFlipkartPaymentOutsideTwoMonthWindowIsIgnored(t *testing.T) {
@@ -113,5 +113,16 @@ func TestFlipkartConflictingOrderItemIsNotSilentlyMatched(t *testing.T) {
 	}
 	results, err := ReconcileMarketplace("flipkart", rows, flipkartDate("2026-08-01"))
 	if err != nil || len(results) != 1 { t.Fatal(results, err) }
-	if results[0].Receipt != "Not Received" || len(results[0].Notes) == 0 { t.Fatal(results[0]) }
+	if results[0].Receipt != "Not Received" || results[0].Financial != "Payment Match Conflict" || len(results[0].Notes) == 0 { t.Fatal(results[0]) }
+}
+
+func TestFlipkartUnsupportedPaymentUsesManualReview(t *testing.T) {
+	rows := []Row{
+		{Kind: "website", OrderID: "OD9", SKU: "SKU9", Date: flipkartDate("2026-07-01"), Updated: flipkartDate("2026-07-02"), Status: "approved"},
+		{Kind: "payment", OrderID: "OD9", SKU: "SKU9", Date: flipkartDate("2026-07-20"), Type: "Unknown adjustment", Amount: -1000},
+		{Kind: "payment", OrderID: "COVER-AUGUST", Date: flipkartDate("2026-08-01"), Type: "Sale", Amount: 100},
+	}
+	results, err := ReconcileMarketplace("flipkart", rows, flipkartDate("2026-09-01"))
+	if err != nil || len(results) != 1 { t.Fatal(results, err) }
+	if results[0].Financial != "Manual Review" || results[0].ClaimStatus != "Review" { t.Fatal(results[0]) }
 }
